@@ -8,10 +8,10 @@ Fork of [dvergari/cloudera-mcp-server](https://github.com/dvergari/cloudera-mcp-
 ## General directives
 
 ### Python and tooling
-- Use **poetry** for virtualenv and dependency management (NOT uv, NOT direct pip).
-- The virtualenv lives in `.venv/` (in-project). Create it with `python3.12 -m venv .venv` then `poetry env use .venv/bin/python`.
-- To install: `.venv/bin/pip install -e ".[dev]"` (pyproject.toml uses poetry-core as the build backend).
-- To run commands in the venv: `.venv/bin/python`, `.venv/bin/pytest`, `.venv/bin/ruff`, etc.
+- Use **uv** for virtualenv, dependency, and lockfile management. `uv.lock` is committed; `poetry.lock` is not used.
+- The virtualenv lives in `.venv/` (in-project). Create it with `uv venv --python 3.12`, then `uv sync --extra dev` to install.
+- The build backend is `poetry-core` (PEP 517) for the src-layout package; this is independent of the dev tool. Plain `pip install -e ".[dev]"` also works (and is what CI uses).
+- To run commands in the venv: `.venv/bin/python`, `.venv/bin/pytest`, `.venv/bin/ruff`, etc. (or prefix with `uv run`).
 
 ### Git and GitHub
 - Public personal repo on **github.com** (NOT github.dxc.com, which is corporate).
@@ -36,10 +36,9 @@ Apache License 2.0 — same as the original dvergari repo.
 git clone https://github.com/doddys/cdp-mcp-server.git
 cd cdp-mcp-server
 
-# Python 3.12 virtualenv
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+# Python 3.12 virtualenv (uv)
+uv venv --python 3.12
+uv sync --extra dev
 
 # Config
 cp .env.example .env

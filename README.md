@@ -14,9 +14,8 @@ The codebase builds on the original fork with pluggable registry backends (File,
 # Install
 git clone https://github.com/doddys/cdp-mcp-server.git
 cd cdp-mcp-server
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+uv venv --python 3.12
+uv sync --extra dev
 
 # Configure
 cp cm_instances.yaml.example cm_instances.yaml
@@ -55,7 +54,7 @@ ALL_PROXY=socks5h://127.0.0.1:7890 REGISTRY_BACKEND=file cdp-mcp
 
 `socks5h://` resolves DNS through the proxy, which is usually what you want for
 internal-only hostnames. This requires the `httpx[socks]` extra (already a declared
-dependency — `pip install -e .` / `poetry install` pulls in `socksio` automatically).
+dependency — `uv sync --extra dev` pulls in `socksio` automatically).
 
 ## Claude Desktop Configuration
 

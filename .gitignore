@@ -14,9 +14,6 @@ build/
 *.egg
 pip-wheel-metadata/
 
-# Poetry
-poetry.lock
-
 # Testing
 .pytest_cache/
 .coverage
