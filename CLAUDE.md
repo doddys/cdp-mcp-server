@@ -71,7 +71,9 @@ src/cdp_mcp/
     ├── yarn_client.py   ← YARN ResourceManager REST API (:8088)
     ├── spark_client.py  ← Spark History Server REST API (:18088)
     ├── hdfs_client.py   ← HDFS NameNode JMX (:9870)
-    └── oozie_client.py  ← Oozie REST API (:11000)
+    ├── oozie_client.py  ← Oozie REST API (:11000)
+    ├── errors.py        ← shared SpnegoRequiredError / SpnegoConfigError
+    └── spnego.py        ← lazy httpx-gssapi SPNEGO auth factory (optional [kerberos] extra)
 
 tests/
 ├── unit/                ← Unit tests (httpx mocked with respx, no external dependencies)
@@ -207,25 +209,41 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_clust
 - When a first stable release is ready, generate the documentation.
 - Dedicated `gh-pages` branch for deployment.
 
-## Kerberos (out of scope for MVP)
-For CDP clusters with Kerberos/SPNEGO use `httpx-gssapi`. To be implemented as a `CM_KERBEROS=true` option.
+## Kerberos / SPNEGO (implemented)
 
-### TODO — SPNEGO for downstream clients
-`cm_client.py` uses Basic auth against CM and works. The clients in `clients/` (YARN RM,
-Spark HS, HDFS NameNode JMX, Oozie) receive no credentials: on Kerberized clusters
-unauthenticated requests return a non-JSON response (an HTML negotiation page or an
-empty body), which today surfaces as a generic JSON parse error.
+`cm_client.py` uses Basic auth against CM and is never touched by Kerberos.
+The four downstream clients (YARN RM, Spark HS, HDFS NameNode JMX, Oozie) attach
+SPNEGO auth when a CM instance has `kerberos=true` (`CM_KERBEROS=true` env /
+`kerberos:` yaml key).
 
-- Library: `httpx-gssapi` (implements `httpx.Auth`), to be attached only to the
-  four downstream clients — not to `cm_client.py`.
-- Credentials from a keytab, not interactive `kinit` (long-running server process):
-  `KRB5_CLIENT_KTNAME=/path/to/svc.keytab` + a dedicated principal, so gssapi
-  auto-renews the ticket.
-- Main trade-off: system library dependency (MIT `libkrb5-dev` at build time,
-  `krb5-libs` at runtime) → heavier Docker image.
-- Injection point: `cm_pool.py` (where `YarnClient`, `SparkClient`, `HdfsClient`,
-  `OozieClient` are instantiated) + new `CM_KERBEROS=true` flag in `config.py`.
-- Do not implement without explicit discussion (see architectural rule #4).
+- Library: `httpx-gssapi` (`HTTPSPNEGOAuth`, implements `httpx.Auth`), attached
+  **only** to the four downstream clients — never to `cm_client.py`. Declared as
+  the optional `[kerberos]` extra in `pyproject.toml`; the import in
+  `clients/spnego.py` is lazy so the base install stays krb5-free for
+  non-Kerberized users.
+- Credentials: the **default Kerberos credentials cache** (a `kinit` TGT, or a
+  keytab loaded into the ccache). `build_spnego_auth(kerberos)` in
+  `clients/spnego.py` builds/caches one `HTTPSPNEGOAuth` per process and raises a
+  typed `SpnegoConfigError` (actionable message, no traceback) if the extra is
+  missing or no TGT is available.
+- Injection point: `cm_pool.py` factory methods `get_{yarn,spark,hdfs,oozie}_client`
+  (the single place that constructs downstream clients and attaches auth).
+  `server.py` calls these instead of constructing clients inline.
+- Short-circuit: the per-cluster `spnego_required` set + `disable_on_spnego`
+  apply **only when `kerberos=false`** (the unconfigured fallback). With
+  `kerberos=true` the clients always attempt SPNEGO.
+- Outbound proxying (e.g. `socks5h://` for internal-only hostnames) is via httpx
+  `trust_env` — set `ALL_PROXY`/`HTTPS_PROXY`. No proxy config field.
+- Trade-off: system library dependency (MIT `libkrb5-dev`/`krb5-libs`) → heavier
+  image, only when the `[kerberos]` extra is installed.
+
+### TODO — in-process keytab acquisition (deferred)
+The server currently relies on a TGT already in the ccache, so a long-running
+process needs TGT renewal (cron `kinit -R`, or a keytab loaded into the ccache by
+an external mechanism). In-process keytab acquisition
+(`gssapi.Credentials(keytab=...)` / `KRB5_CLIENT_KTNAME` + a dedicated principal,
+so gssapi auto-renews) is the unattended-production path — tracked as a deferred
+to-do. The spike script `scripts/spnego_spike.py` is the starting point.
 
 ## Future language note
 The PoC is Python + FastMCP. If validated, consider rewriting in Go for distribution as a static binary.
