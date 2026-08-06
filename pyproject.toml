@@ -55,6 +55,13 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.10.0",
 ]
+# Kerberos/SPNEGO for the four downstream service clients on Kerberized
+# clusters. Optional: only needed when a CM instance has kerberos=true.
+# Requires MIT krb5 at build/runtime (macOS: brew install krb5, then build with
+# PKG_CONFIG_PATH=/opt/homebrew/opt/krb5/lib/pkgconfig).
+kerberos = [
+    "httpx-gssapi>=0.6.0",
+]
 
 [project.scripts]
 cdp-mcp = "cdp_mcp.server:run"

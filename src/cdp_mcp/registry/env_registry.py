@@ -13,6 +13,8 @@ Environment variables:
   CM_TIMEOUT_SECONDS             — default 30
   CM_DOWNSTREAM_TIMEOUT_SECONDS  — default 30
   CM_DISABLE_ON_SPNEGO           — default "true"
+  CM_KERBEROS                    — default "false" (use SPNEGO for downstream)
+  # Outbound proxy: set ALL_PROXY / HTTPS_PROXY env vars (httpx trust_env).
 """
 from __future__ import annotations
 
@@ -67,6 +69,9 @@ class EnvRegistry(BaseRegistry):
                 os.environ.get("CM_DOWNSTREAM_TIMEOUT_SECONDS", "30")
             ),
             disable_on_spnego=_bool(os.environ.get("CM_DISABLE_ON_SPNEGO", "true")),
+            # SPNEGO for downstream service endpoints only (NameNode/YARN/Spark/
+            # Oozie). cm_client.py is unaffected — it always uses Basic auth.
+            kerberos=_bool(os.environ.get("CM_KERBEROS", "false")),
         )
         self._instance = [settings]
         log.info("env_registry.loaded", host=host)

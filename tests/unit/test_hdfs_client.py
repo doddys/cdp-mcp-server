@@ -149,3 +149,27 @@ async def test_get_namenode_status_spnego_challenge_raises(client):
     )
     with pytest.raises(SpnegoRequiredError):
         await client.get_namenode_status()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_none_block_counters_coerced_to_zero(client):
+    """JMX may return a counter key with value None (observed live on some
+    clusters). This must not crash the `> 0` health math with TypeError."""
+    fs = {
+        **FS_HEALTHY,
+        "UnderReplicatedBlocks": None,
+        "CorruptBlocks": None,
+        "MissingBlocks": None,
+    }
+    respx.get(f"{BASE}/jmx", params={"qry": "Hadoop:service=NameNode,name=FSNamesystemState"}).mock(
+        return_value=httpx.Response(200, json={"beans": [fs]})
+    )
+    respx.get(f"{BASE}/jmx", params={"qry": "Hadoop:service=NameNode,name=NameNodeStatus"}).mock(
+        return_value=httpx.Response(200, json={"beans": [NN_STATUS]})
+    )
+    result = await client.get_namenode_status()
+    assert result["health_summary"] == "HEALTHY"
+    assert result["under_replicated_blocks"] == 0
+    assert result["corrupt_blocks"] == 0
+    assert result["missing_blocks"] == 0

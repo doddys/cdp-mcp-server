@@ -24,6 +24,13 @@ class ClouderaManagerSettings:
     timeout_seconds: int = 30
     downstream_timeout_seconds: int = 30
     disable_on_spnego: bool = True
+    # Kerberos / SPNEGO for the four downstream clients (YARN/Spark/HDFS/Oozie).
+    # When True, the clients attach an HTTPSPNEGOAuth that uses the default
+    # Kerberos credentials cache (a TGT obtained via `kinit`, or a keytab
+    # loaded into the ccache). cm_client.py is unaffected (Basic auth).
+    # Outbound proxying (e.g. socks5h://) is handled by httpx trust_env, which
+    # honours ALL_PROXY / HTTPS_PROXY / HTTP_PROXY env vars with no config here.
+    kerberos: bool = False
     environment_name: str = "default"
     active: bool = True
     use_knox: bool = False
