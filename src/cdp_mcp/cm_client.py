@@ -19,6 +19,15 @@ from tenacity import (
 
 from cdp_mcp.config import ClouderaManagerSettings, ServerSettings
 
+
+def _to_num(v: Any) -> int | float:
+    """Coerce a CM counter value to a number, treating None/str as 0."""
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, (int, float)):
+        return v
+    return 0
+
 log = structlog.get_logger(__name__)
 
 
@@ -446,6 +455,176 @@ class ClouderaManagerClient:
             "time_range_defaulted": time_range_defaulted,
             "effective_range": {"start": start_time, "end": end_time},
         }
+
+    async def get_replication_metrics(
+        self,
+        cluster_name: str,
+        service_name: str,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        schedule_id: int | None = None,
+        max_schedules: int = 100,
+        max_runs_per_schedule: int = 1000,
+        include_failures: bool = True,
+        max_failures: int = 20,
+    ) -> dict[str, Any]:
+        """
+        Aggregated replication execution metrics over a time window -- the
+        right tool for a monthly report. Paginates each schedule's history
+        (via get_replication_history, view=summary) and accumulates the
+        per-run counters into per-schedule totals, returning a compact
+        summary that stays well under the tool-result cap even for an hourly
+        schedule over a month (~720 runs).
+
+        If schedule_id is None, iterates all schedules on the service (capped
+        by max_schedules via list_replication_schedules); otherwise reports
+        just that one schedule.
+        """
+        time_range_defaulted = start_time is None and end_time is None
+        start_time, end_time = self._validate_time_range(start_time, end_time)
+
+        if schedule_id is not None:
+            schedules = [{"id": schedule_id, "displayName": str(schedule_id)}]
+            schedule_truncated = False
+        else:
+            disc = await self.list_replication_schedules(
+                cluster_name,
+                service_name,
+                max_schedules=max_schedules,
+                max_commands=1,
+            )
+            schedules = disc["items"]
+            schedule_truncated = disc["truncated"]
+
+        per_schedule: list[dict[str, Any]] = []
+        total_scanned = 0
+        for sch in schedules:
+            sid = sch.get("id")
+            name = sch.get("displayName") or sch.get("name") or str(sid)
+            hist = await self.get_replication_history(
+                cluster_name,
+                service_name,
+                sid,
+                limit=max_runs_per_schedule,
+                start_time=start_time,
+                end_time=end_time,
+                view="summary",
+                max_scan=max(max_runs_per_schedule, 10000),
+            )
+            runs = hist["items"]
+            agg = self._aggregate_replication_runs(name, sch, runs)
+            agg["schedule_id"] = sid
+            agg["runs"] = len(runs)
+            agg["total_in_range"] = hist["total_in_range"]
+            agg["truncated"] = hist["truncated"] or hist["total_in_range"] > len(runs)
+            if include_failures:
+                agg["failures"] = [
+                    {
+                        "id": r.get("id"),
+                        "start_time": r.get("startTime"),
+                        "end_time": r.get("endTime"),
+                        "result_message": (r.get("resultMessage") or "")[:300],
+                    }
+                    for r in runs
+                    if r.get("success") is False
+                ][:max_failures]
+            else:
+                agg["failures"] = []
+            per_schedule.append(agg)
+            total_scanned += len(runs)
+
+        return {
+            "schedules": per_schedule,
+            "schedule_count": len(per_schedule),
+            "schedule_truncated": schedule_truncated,
+            "scanned_runs": total_scanned,
+            "time_range_defaulted": time_range_defaulted,
+            "effective_range": {"start": start_time, "end": end_time},
+        }
+
+    @staticmethod
+    def _aggregate_replication_runs(
+        name: str, schedule: dict, runs: list[dict]
+    ) -> dict[str, Any]:
+        """Sum per-run replication counters (HDFS/Ozone and Hive result objects)
+        into a compact per-schedule summary. Generically handles other result
+        types by name only -- extend _COUNTER_PATHS to aggregate new types."""
+        # Service type from the schedule's arguments block (no explicit type
+        # field on ApiReplicationSchedule); fall back to the run's result key.
+        stype = (
+            "HIVE" if schedule.get("hiveArguments")
+            else "HDFS" if schedule.get("hdfsArguments")
+            else "UNKNOWN"
+        )
+        if stype == "UNKNOWN" and runs:
+            for r in runs:
+                for key, name in (
+                    ("hdfsResult", "HDFS"),
+                    ("hiveResult", "HIVE"),
+                    ("ozoneResult", "OZONE"),
+                    ("icebergResult", "ICEBERG"),
+                    ("rangerResult", "RANGER"),
+                    ("hiveOnTezResult", "HIVE_ON_TEZ"),
+                ):
+                    if r.get(key):
+                        stype = name
+                        break
+                if stype != "UNKNOWN":
+                    break
+        agg: dict[str, Any] = {
+            "name": name,
+            "type": stype,
+            "succeeded": 0,
+            "failed": 0,
+            "total_bytes_copied": 0,
+            "total_files_copied": 0,
+            "total_files_failed": 0,
+            "total_files_skipped": 0,
+            "total_files_deleted": 0,
+            "total_tables_processed": 0,
+            "total_errors": 0,
+            "durations_seconds": [],
+            "first_run": None,
+            "last_run": None,
+        }
+        for run in runs:
+            if run.get("success") is True:
+                agg["succeeded"] += 1
+            elif run.get("success") is False:
+                agg["failed"] += 1
+            st = run.get("startTime")
+            et = run.get("endTime")
+            if st:
+                if agg["first_run"] is None or st < agg["first_run"]:
+                    agg["first_run"] = st
+                if agg["last_run"] is None or st > agg["last_run"]:
+                    agg["last_run"] = st
+            if st and et:
+                try:
+                    s = datetime.fromisoformat(st.replace("Z", "+00:00"))
+                    e = datetime.fromisoformat(et.replace("Z", "+00:00"))
+                    agg["durations_seconds"].append((e - s).total_seconds())
+                except ValueError:
+                    pass
+            # HDFS/Ozone counters, or Hive's embedded HDFS-style result.
+            res = run.get("hdfsResult") or (
+                run.get("hiveResult") or {}
+            ).get("dataReplicationResult")
+            if res:
+                agg["total_bytes_copied"] += _to_num(res.get("numBytesCopied"))
+                agg["total_files_copied"] += _to_num(res.get("numFilesCopied"))
+                agg["total_files_failed"] += _to_num(res.get("numFilesCopyFailed"))
+                agg["total_files_skipped"] += _to_num(res.get("numFilesSkipped"))
+                agg["total_files_deleted"] += _to_num(res.get("numFilesDeleted"))
+            hr = run.get("hiveResult")
+            if hr:
+                agg["total_tables_processed"] += _to_num(hr.get("tableProcessed"))
+                agg["total_errors"] += _to_num(hr.get("errorCount"))
+        durations = agg.pop("durations_seconds")
+        agg["avg_duration_seconds"] = (
+            round(sum(durations) / len(durations), 1) if durations else 0
+        )
+        return agg
 
     async def list_parcels(self, cluster_name: str) -> list[dict]:
         data = await self._get(f"/clusters/{cluster_name}/parcels")

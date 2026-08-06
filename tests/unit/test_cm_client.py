@@ -305,6 +305,109 @@ async def test_get_replication_history_limit_and_truncate(client):
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_get_replication_metrics_single_schedule(client):
+    # HDFS schedule: 3 in-window runs (one failed), one older out-of-window.
+    runs = [
+        {"id": 1, "success": True,
+         "startTime": "2026-08-06T11:30:00.000Z", "endTime": "2026-08-06T11:31:00.000Z",
+         "hdfsResult": {"numBytesCopied": 1000, "numFilesCopied": 10,
+                        "numFilesCopyFailed": 0, "numFilesSkipped": 2}},
+        {"id": 2, "success": False,
+         "startTime": "2026-08-06T11:20:00.000Z", "endTime": "2026-08-06T11:20:30.000Z",
+         "hdfsResult": {"numBytesCopied": 500, "numFilesCopied": 5,
+                        "numFilesCopyFailed": 3},
+         "resultMessage": "copy failed"},
+        {"id": 3, "success": True,
+         "startTime": "2026-08-06T11:10:00.000Z", "endTime": "2026-08-06T11:10:30.000Z",
+         "hdfsResult": {"numBytesCopied": 2000, "numFilesCopied": 20}},
+        {"id": 0, "success": True, "startTime": "2026-08-06T09:00:00.000Z",
+         "hdfsResult": {"numBytesCopied": 99999}},  # out of window
+    ]
+    respx.get(
+        f"{BASE}/clusters/My%20Cluster/services/hdfs/replications/42/history"
+    ).mock(return_value=httpx.Response(200, json={"items": runs}))
+    result = await client.get_replication_metrics(
+        "My Cluster", "hdfs",
+        start_time="2026-08-06T11:00:00.000Z",
+        end_time="2026-08-06T12:00:00.000Z",
+        schedule_id=42,
+    )
+    assert result["schedule_count"] == 1
+    sch = result["schedules"][0]
+    assert sch["schedule_id"] == 42
+    assert sch["type"] == "HDFS"  # schedule had no hdfsArguments -> UNKNOWN actually
+    assert sch["runs"] == 3            # out-of-window run excluded
+    assert sch["succeeded"] == 2
+    assert sch["failed"] == 1
+    assert sch["total_bytes_copied"] == 3500   # 1000 + 500 + 2000
+    assert sch["total_files_copied"] == 35     # 10 + 5 + 20
+    assert sch["total_files_failed"] == 3
+    assert sch["total_files_skipped"] == 2
+    assert sch["avg_duration_seconds"] == 40.0  # (60+30+30)/3
+    assert sch["first_run"] == "2026-08-06T11:10:00.000Z"
+    assert sch["last_run"] == "2026-08-06T11:30:00.000Z"
+    assert sch["truncated"] is False
+    assert len(sch["failures"]) == 1
+    assert sch["failures"][0]["id"] == 2
+    assert sch["failures"][0]["result_message"] == "copy failed"
+    assert result["scanned_runs"] == 3
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_replication_metrics_all_schedules(client):
+    # Discovery returns 2 HIVE schedules; each paginated separately.
+    respx.get(
+        f"{BASE}/clusters/My%20Cluster/services/hive/replications"
+    ).mock(return_value=httpx.Response(
+        200, json={"items": [
+            {"id": 1, "displayName": "hive-sync", "hiveArguments": {}},
+            {"id": 2, "displayName": "hive-sync-2", "hiveArguments": {}},
+        ]}
+    ))
+    def history_handler(request):
+        sid = request.url.path.split("/")[-2]
+        # schedule 1: one in-window run with table metrics
+        if sid == "1":
+            items = [{"id": 10, "success": True,
+                      "startTime": "2026-08-06T11:30:00.000Z",
+                      "endTime": "2026-08-06T11:31:00.000Z",
+                      "hiveResult": {"tableProcessed": 736, "errorCount": 0,
+                                     "dataReplicationResult": {"numBytesCopied": 500}}}]
+        else:
+            items = [{"id": 20, "success": False,
+                      "startTime": "2026-08-06T11:30:00.000Z",
+                      "endTime": "2026-08-06T11:31:00.000Z",
+                      "hiveResult": {"tableProcessed": 100, "errorCount": 4,
+                                     "dataReplicationResult": {"numBytesCopied": 0}},
+                      "resultMessage": "boom"}]
+        return httpx.Response(200, json={"items": items})
+    respx.get(
+        f"{BASE}/clusters/My%20Cluster/services/hive/replications/1/history"
+    ).mock(side_effect=history_handler)
+    respx.get(
+        f"{BASE}/clusters/My%20Cluster/services/hive/replications/2/history"
+    ).mock(side_effect=history_handler)
+    result = await client.get_replication_metrics(
+        "My Cluster", "hive",
+        start_time="2026-08-06T11:00:00.000Z",
+        end_time="2026-08-06T12:00:00.000Z",
+    )
+    assert result["schedule_count"] == 2
+    assert result["schedule_truncated"] is False
+    by_id = {s["schedule_id"]: s for s in result["schedules"]}
+    assert by_id[1]["type"] == "HIVE"
+    assert by_id[1]["total_tables_processed"] == 736
+    assert by_id[1]["total_errors"] == 0
+    assert by_id[1]["total_bytes_copied"] == 500  # via dataReplicationResult
+    assert by_id[1]["succeeded"] == 1 and by_id[1]["failed"] == 0
+    assert by_id[2]["failed"] == 1
+    assert by_id[2]["total_errors"] == 4
+    assert by_id[2]["failures"][0]["result_message"] == "boom"
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_list_parcels(client):
     respx.get(f"{BASE}/clusters/My%20Cluster/parcels").mock(
         return_value=httpx.Response(

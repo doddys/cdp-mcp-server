@@ -750,6 +750,70 @@ async def get_replication_history(
 
 
 @mcp.tool()
+async def get_replication_metrics(
+    cluster_name: str,
+    service_name: str,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    schedule_id: int | None = None,
+    max_schedules: int = 100,
+    max_runs_per_schedule: int = 1000,
+    include_failures: bool = True,
+    max_failures: int = 20,
+) -> str:
+    """
+    Aggregated replication execution metrics over a time window -- the right
+    tool for a monthly report.
+
+    Paginates each schedule's history (view=summary) and accumulates the
+    per-run counters into per-schedule totals: runs, succeeded, failed, total
+    bytes/files copied, files failed, tables processed (Hive), errors, average
+    duration, first/last run, plus a capped list of failed runs. The summary
+    stays well under the tool-result cap even for an hourly schedule over a
+    month (~720 runs), unlike paging raw history.
+
+    If schedule_id is None, iterates all schedules on the service (capped by
+    max_schedules); otherwise reports just that one. Per-schedule "truncated":
+    true means max_runs_per_schedule was hit before the full window was
+    aggregated -- raise it or narrow the range. "schedule_truncated": true
+    means max_schedules was hit -- more schedules exist.
+
+    For per-run raw detail (full counters, failedFiles, errors, tables), use
+    get_replication_history() with view=full on a specific schedule.
+
+    Args:
+      cluster_name:           Cluster name.
+      service_name:           Service name (e.g. HDFS, HIVE).
+      start_time:             ISO 8601 start time (default: 1 hour ago).
+      end_time:               ISO 8601 end time (default: now).
+      schedule_id:            Optional single schedule ID (default: all on service).
+      max_schedules:          Cap on schedules scanned when schedule_id is None (default 100).
+      max_runs_per_schedule:  Safety cap on runs aggregated per schedule (default 1000).
+      include_failures:       Include the capped failed-run list (default true).
+      max_failures:           Max failed runs listed per schedule (default 20).
+    """
+    client = _pool.get_client_for_cluster(cluster_name)
+    if client is None:
+        return _no_client(cluster_name)
+    try:
+        return _dump(
+            await client.get_replication_metrics(
+                cluster_name,
+                service_name,
+                start_time=start_time,
+                end_time=end_time,
+                schedule_id=schedule_id,
+                max_schedules=max_schedules,
+                max_runs_per_schedule=max_runs_per_schedule,
+                include_failures=include_failures,
+                max_failures=max_failures,
+            )
+        )
+    except Exception as exc:
+        return _dump({"error": str(exc)})
+
+
+@mcp.tool()
 async def list_parcels(cluster_name: str) -> str:
     """
     List parcels (CDH/runtime distribution packages) available to a
