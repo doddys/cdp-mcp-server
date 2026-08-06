@@ -249,13 +249,58 @@ async def test_list_replication_schedules_truncated(client):
 @respx.mock
 @pytest.mark.asyncio
 async def test_get_replication_history(client):
-    respx.get(
+    # newest-first page: two runs in-window, one older (out of window),
+    # one without startTime (filtered out).
+    in1 = {"id": 100, "success": True,
+           "startTime": "2026-08-06T11:30:00.000Z", "endTime": "2026-08-06T11:31:00.000Z"}
+    in2 = {"id": 101, "success": False,
+           "startTime": "2026-08-06T11:10:00.000Z", "endTime": "2026-08-06T11:11:00.000Z"}
+    old = {"id": 99, "success": True, "startTime": "2026-08-06T09:00:00.000Z"}
+    no_time = {"id": 98, "success": True}
+    route = respx.get(
         f"{BASE}/clusters/My%20Cluster/services/hdfs/replications/1/history"
     ).mock(
-        return_value=httpx.Response(200, json={"items": [{"id": 100, "success": True}]})
+        return_value=httpx.Response(200, json={"items": [in1, in2, old, no_time]})
     )
-    result = await client.get_replication_history("My Cluster", "hdfs", 1)
-    assert result == [{"id": 100, "success": True}]
+    result = await client.get_replication_history(
+        "My Cluster", "hdfs", 1,
+        start_time="2026-08-06T11:00:00.000Z",
+        end_time="2026-08-06T12:00:00.000Z",
+    )
+    assert route.calls.last.request.url.params["view"] == "summary"
+    assert route.calls.last.request.url.params["offset"] == "0"
+    assert result["items"] == [in1, in2]  # newest-first, in-window only
+    assert result["count"] == 2
+    assert result["total_in_range"] == 2
+    assert result["truncated"] is False
+    assert result["effective_range"] == {
+        "start": "2026-08-06T11:00:00.000Z",
+        "end": "2026-08-06T12:00:00.000Z",
+    }
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_replication_history_limit_and_truncate(client):
+    runs = [
+        {"id": i, "success": True,
+         "startTime": f"2026-08-06T11:{59 - i:02d}:00.000Z"}
+        for i in range(10)
+    ]
+    respx.get(
+        f"{BASE}/clusters/My%20Cluster/services/hdfs/replications/1/history"
+    ).mock(return_value=httpx.Response(200, json={"items": runs}))
+    result = await client.get_replication_history(
+        "My Cluster", "hdfs", 1,
+        start_time="2026-08-06T11:00:00.000Z",
+        end_time="2026-08-06T12:00:00.000Z",
+        limit=3,
+    )
+    assert result["count"] == 3            # capped to limit
+    assert result["total_in_range"] == 10  # but full match count reported
+    assert result["truncated"] is False
+    # newest-first: ids 0 (11:59) .. 9 (11:50)
+    assert [r["id"] for r in result["items"]] == [0, 1, 2]
 
 
 @respx.mock

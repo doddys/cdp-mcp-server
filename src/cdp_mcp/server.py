@@ -695,17 +695,39 @@ async def get_replication_history(
     cluster_name: str,
     service_name: str,
     schedule_id: int,
-    limit: int = 20,
+    limit: int = 50,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    view: str = "summary",
+    max_scan: int = 10000,
 ) -> str:
     """
-    Get run history for a replication schedule, as returned by
-    list_replication_schedules().
+    Get run history for one replication schedule, paginated over a time window.
+
+    Use list_replication_schedules() first to get the schedule_id. CM has no
+    server-side time filter on this endpoint, so the window is applied
+    client-side while paging by offset (history is returned newest-first).
+
+    The response paginates internally up to `limit` in-range runs (or max_scan
+    raw runs, whichever comes first). "truncated": true means max_scan was hit
+    before the full window was covered -- raise max_scan or narrow the range.
+    "total_in_range" tells you how many runs matched regardless of `limit`.
+    For an aggregated 1-month report across many schedules, prefer
+    get_replication_metrics() over paging this raw detail.
+
+    view=summary (default) carries the per-run counters (bytes/files copied,
+    tableCount, errorCount) at ~10-40x smaller than full; use view=full only
+    when you need per-failure detail (failedFiles, errors, tables).
 
     Args:
       cluster_name: Cluster name.
       service_name: Service name (e.g. HDFS, HIVE).
-      schedule_id:  Replication schedule ID.
-      limit:        Maximum history entries to return (default 20).
+      schedule_id:  Replication schedule ID (from list_replication_schedules()).
+      limit:        Maximum in-range runs to return (default 50).
+      start_time:   ISO 8601 start time (default: 1 hour ago).
+      end_time:     ISO 8601 end time (default: now).
+      view:         "summary" (default) or "full".
+      max_scan:     Safety cap on raw runs scanned while paginating (default 10000).
     """
     client = _pool.get_client_for_cluster(cluster_name)
     if client is None:
@@ -713,7 +735,14 @@ async def get_replication_history(
     try:
         return _dump(
             await client.get_replication_history(
-                cluster_name, service_name, schedule_id, limit=limit
+                cluster_name,
+                service_name,
+                schedule_id,
+                limit=limit,
+                start_time=start_time,
+                end_time=end_time,
+                view=view,
+                max_scan=max_scan,
             )
         )
     except Exception as exc:

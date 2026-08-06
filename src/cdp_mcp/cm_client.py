@@ -371,14 +371,81 @@ class ClouderaManagerClient:
         cluster_name: str,
         service_name: str,
         schedule_id: int,
-        limit: int = 20,
-    ) -> list[dict]:
-        data = await self._get(
-            f"/clusters/{cluster_name}/services/{service_name}"
-            f"/replications/{schedule_id}/history",
-            params={"limit": limit},
-        )
-        return data.get("items", [])
+        limit: int = 50,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        view: str = "summary",
+        max_scan: int = 10000,
+    ) -> dict[str, Any]:
+        """
+        Get run history for one replication schedule, paginated.
+
+        CM's /replications/{id}/history has NO server-side time filter (only
+        limit/offset/view -- confirmed against the v51 docs), so a wide window
+        is covered by paging by offset with a client-side cutoff on each run's
+        startTime (history is returned newest-first). This paginates internally
+        up to `limit` in-range runs or max_scan raw runs, like get_alerts().
+
+        view=summary already carries all scalar counters (numBytesCopied,
+        tableCount, errorCount, etc.) at ~10-40x smaller than full (confirmed
+        live); use view=full only for per-failure detail (failedFiles, errors,
+        tables).
+        """
+        time_range_defaulted = start_time is None and end_time is None
+        start_time, end_time = self._validate_time_range(start_time, end_time)
+        start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+
+        page_size = 100
+        offset = 0
+        raw_items: list[dict] = []
+        truncated = False
+        while True:
+            params: dict[str, Any] = {
+                "limit": page_size,
+                "offset": offset,
+                "view": view,
+            }
+            data = await self._get(
+                f"/clusters/{cluster_name}/services/{service_name}"
+                f"/replications/{schedule_id}/history",
+                params=params,
+            )
+            page = data.get("items", [])
+            if not page:
+                break
+            raw_items.extend(page)
+            # History is newest-first: once the oldest item in a page is older
+            # than start_time we have left the window -- stop.
+            oldest = page[-1].get("startTime")
+            if oldest:
+                oldest_dt = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
+                if oldest_dt < start_dt:
+                    break
+            if len(page) < page_size:
+                break
+            if len(raw_items) >= max_scan:
+                truncated = True
+                break
+            offset += page_size
+
+        in_range = []
+        for it in raw_items:
+            st = it.get("startTime")
+            if not st:
+                continue
+            sdt = datetime.fromisoformat(st.replace("Z", "+00:00"))
+            if start_dt <= sdt < end_dt:
+                in_range.append(it)
+        in_range.sort(key=lambda it: it.get("startTime", ""), reverse=True)
+        return {
+            "items": in_range[:limit],
+            "count": min(len(in_range), limit),
+            "total_in_range": len(in_range),
+            "truncated": truncated,
+            "time_range_defaulted": time_range_defaulted,
+            "effective_range": {"start": start_time, "end": end_time},
+        }
 
     async def list_parcels(self, cluster_name: str) -> list[dict]:
         data = await self._get(f"/clusters/{cluster_name}/parcels")
