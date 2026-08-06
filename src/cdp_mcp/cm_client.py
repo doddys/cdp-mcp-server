@@ -230,12 +230,99 @@ class ClouderaManagerClient:
         cluster_name: str,
         start_time: str | None = None,
         end_time: str | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
+        """
+        CM enforces a hard, undocumented-in-our-code-until-now limit: the
+        'to'/'from' duration must be under 30 days (confirmed live -- a
+        36-day request fails with HTTP 400: "the duration between 'to' and
+        'from' must be less than 30 days"). Requests wider than 29 days are
+        split into <=29-day chunks and merged (avg* fields: duration-weighted
+        average; max* fields: true max across chunks, carrying the matching
+        *TimestampMs; everything else: taken from the most recent chunk) so
+        callers -- including monthly/quarterly reporting workflows -- don't
+        need to know about or implement this CM quirk themselves.
+        """
+        from datetime import timedelta
+
+        time_range_defaulted = start_time is None and end_time is None
         start_time, end_time = self._validate_time_range(start_time, end_time)
-        params: dict[str, Any] = {"from": start_time, "to": end_time}
-        return await self._get(
-            f"/clusters/{cluster_name}/utilization", params=params
+
+        start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+        chunk_days = 29
+
+        chunks: list[tuple[str, str]] = []
+        if (end_dt - start_dt) <= timedelta(days=chunk_days):
+            chunks = [(start_time, end_time)]
+        else:
+            cursor = start_dt
+            while cursor < end_dt:
+                chunk_end = min(cursor + timedelta(days=chunk_days), end_dt)
+                chunks.append((cursor.isoformat(), chunk_end.isoformat()))
+                cursor = chunk_end
+
+        responses: list[tuple[str, str, dict]] = []
+        for chunk_start, chunk_end in chunks:
+            params: dict[str, Any] = {"from": chunk_start, "to": chunk_end}
+            data = await self._get(
+                f"/clusters/{cluster_name}/utilization", params=params
+            )
+            responses.append((chunk_start, chunk_end, data))
+
+        merged = (
+            dict(responses[0][2])
+            if len(responses) == 1
+            else self._merge_utilization_chunks(responses)
         )
+        merged["time_range_defaulted"] = time_range_defaulted
+        merged["effective_range"] = {"start": start_time, "end": end_time}
+        merged["chunked"] = len(responses) > 1
+        merged["num_chunks"] = len(responses)
+        return merged
+
+    @staticmethod
+    def _merge_utilization_chunks(
+        responses: list[tuple[str, str, dict]],
+    ) -> dict[str, Any]:
+        def _duration_days(s: str, e: str) -> float:
+            sd = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            ed = datetime.fromisoformat(e.replace("Z", "+00:00"))
+            return max((ed - sd).total_seconds() / 86400, 1e-9)
+
+        weights = [_duration_days(s, e) for s, e, _ in responses]
+        total_weight = sum(weights)
+        all_keys: set[str] = set()
+        for _, _, data in responses:
+            all_keys.update(data.keys())
+
+        merged: dict[str, Any] = {}
+        for key in all_keys:
+            if key.endswith("TimestampMs"):
+                continue  # handled alongside its paired max* key below
+            values = [data.get(key) for _, _, data in responses]
+            if key.startswith("avg"):
+                numeric = [
+                    (w, v) for w, v in zip(weights, values, strict=True)
+                    if isinstance(v, int | float)
+                ]
+                merged[key] = (
+                    sum(w * v for w, v in numeric) / total_weight if numeric else None
+                )
+            elif key.startswith("max"):
+                numeric = [
+                    (v, i) for i, v in enumerate(values) if isinstance(v, int | float)
+                ]
+                if numeric:
+                    best_val, best_idx = max(numeric, key=lambda t: t[0])
+                    merged[key] = best_val
+                    ts_key = f"{key}TimestampMs"
+                    if ts_key in all_keys:
+                        merged[ts_key] = responses[best_idx][2].get(ts_key)
+                else:
+                    merged[key] = values[-1]
+            else:
+                merged[key] = values[-1]
+        return merged
 
     async def list_replication_schedules(
         self, cluster_name: str, service_name: str
@@ -283,7 +370,8 @@ class ClouderaManagerClient:
         start_time: str | None = None,
         end_time: str | None = None,
         limit: int = 50,
-    ) -> list[dict]:
+    ) -> dict[str, Any]:
+        time_range_defaulted = start_time is None and end_time is None
         start_time, end_time = self._validate_time_range(start_time, end_time)
         params: dict[str, Any] = {
             "from": start_time,
@@ -296,7 +384,11 @@ class ClouderaManagerClient:
             f"/clusters/{cluster_name}/services/{service_name}/impalaQueries",
             params=params,
         )
-        return data.get("queries", [])
+        return {
+            "items": data.get("queries", []),
+            "time_range_defaulted": time_range_defaulted,
+            "effective_range": {"start": start_time, "end": end_time},
+        }
 
     async def get_cluster_security_info(self, cluster_name: str) -> dict:
         """Combined TLS and Kerberos status for a cluster."""
@@ -404,13 +496,23 @@ class ClouderaManagerClient:
         start_time: str | None = None,
         end_time: str | None = None,
         limit: int = 50,
-    ) -> list[dict]:
+        max_scan: int = 10000,
+    ) -> dict[str, Any]:
         """
         CM has no /clusters/{name}/events resource; events are only queryable
         via the global /events endpoint. Cluster association lives in the
         free-form attributes list (undocumented key), so cluster_name is
         applied client-side after fetching a larger buffer server-side.
+
+        On an active cluster, a single maxResults-capped request can cover
+        only a small fraction of a wide [start_time, end_time] window --
+        confirmed live: a 5-week request returned only ~1.3 hours of actual
+        coverage. This paginates via resultOffset until the requested range
+        is fully scanned or max_scan raw events have been fetched (whichever
+        comes first), and reports which happened via "truncated" so a caller
+        never silently gets a partial answer that looks complete.
         """
+        time_range_defaulted = start_time is None and end_time is None
         start_time, end_time = self._validate_time_range(start_time, end_time)
         filters = [
             f"timeReceived=ge={start_time}",
@@ -420,21 +522,44 @@ class ClouderaManagerClient:
             filters.append(f"category=={category}")
         if severity:
             filters.append(f"severity=={severity}")
-        params: dict[str, Any] = {
-            "query": ";".join(filters),
-            "maxResults": min(limit * 5, 500),
-        }
-        data = await self._get("/events", params=params)
-        items = data.get("items", [])
+        query = ";".join(filters)
+
+        page_size = 100
+        offset = 0
+        raw_items: list[dict] = []
+        truncated = False
+        while True:
+            params: dict[str, Any] = {
+                "query": query,
+                "maxResults": page_size,
+                "resultOffset": offset,
+            }
+            data = await self._get("/events", params=params)
+            page = data.get("items", [])
+            raw_items.extend(page)
+            if len(page) < page_size:
+                break
+            if len(raw_items) >= max_scan:
+                truncated = True
+                break
+            offset += page_size
+
         matched = [
             item
-            for item in items
+            for item in raw_items
             if any(
                 cluster_name in attr.get("values", [])
                 for attr in item.get("attributes", [])
             )
         ]
-        return matched[:limit]
+        matched.sort(key=lambda item: item.get("timeOccurred", ""), reverse=True)
+        return {
+            "items": matched[:limit],
+            "total_matched_in_range": len(matched),
+            "truncated": truncated,
+            "time_range_defaulted": time_range_defaulted,
+            "effective_range": {"start": start_time, "end": end_time},
+        }
 
     # ── Metrics ───────────────────────────────────────────────────────────────
 
@@ -445,7 +570,8 @@ class ClouderaManagerClient:
         metric_names: list[str],
         start_time: str | None = None,
         end_time: str | None = None,
-    ) -> list[dict]:
+    ) -> dict[str, Any]:
+        time_range_defaulted = start_time is None and end_time is None
         start_time, end_time = self._validate_time_range(start_time, end_time)
         metric_selector = ", ".join(metric_names)
         tsquery = (
@@ -459,7 +585,11 @@ class ClouderaManagerClient:
             "to": end_time,
         }
         data = await self._post("/timeseries", json=body)
-        return data.get("items", [])
+        return {
+            "items": data.get("items", []),
+            "time_range_defaulted": time_range_defaulted,
+            "effective_range": {"start": start_time, "end": end_time},
+        }
 
     async def get_host_metrics(
         self,
@@ -467,7 +597,8 @@ class ClouderaManagerClient:
         metric_names: list[str],
         start_time: str | None = None,
         end_time: str | None = None,
-    ) -> list[dict]:
+    ) -> dict[str, Any]:
+        time_range_defaulted = start_time is None and end_time is None
         start_time, end_time = self._validate_time_range(start_time, end_time)
         metric_selector = ", ".join(metric_names)
         tsquery = f"SELECT {metric_selector} WHERE hostname = {hostname!r}"
@@ -477,7 +608,11 @@ class ClouderaManagerClient:
             "to": end_time,
         }
         data = await self._post("/timeseries", json=body)
-        return data.get("items", [])
+        return {
+            "items": data.get("items", []),
+            "time_range_defaulted": time_range_defaulted,
+            "effective_range": {"start": start_time, "end": end_time},
+        }
 
     async def list_available_metrics(self, name_contains: str | None = None) -> list[dict]:
         """
@@ -598,29 +733,61 @@ class ClouderaManagerClient:
         service_name: str | None = None,
         user_name: str | None = None,
         limit: int = 50,
-    ) -> list[dict]:
+        max_scan: int = 10000,
+    ) -> dict[str, Any]:
         """
         CM has no /clusters/{name}/audits resource -- audits are only
         queryable via the global /audits endpoint, and ApiAudit carries no
         cluster reference at all (only a service name). cluster_name is used
         upstream to pick the right CM client; it cannot filter server-side
         here, so it's intentionally not applied to the request.
+
+        Same maxResults-vs-range problem as get_alerts (confirmed live: a
+        default 1h call returned 4 events, a 5-week-range call returned 50
+        events but only spanning ~12h) -- paginates via resultOffset until
+        the requested range is fully scanned or max_scan events are fetched,
+        reporting which happened via "truncated".
         """
+        time_range_defaulted = start_time is None and end_time is None
         start_time, end_time = self._validate_time_range(start_time, end_time)
         filters = []
         if service_name:
             filters.append(f"service=={service_name}")
         if user_name:
             filters.append(f"username=={user_name}")
-        params: dict[str, Any] = {
-            "startTime": start_time,
-            "endTime": end_time,
-            "maxResults": limit,
+        query = ";".join(filters) if filters else None
+
+        page_size = 100
+        offset = 0
+        items: list[dict] = []
+        truncated = False
+        while True:
+            params: dict[str, Any] = {
+                "startTime": start_time,
+                "endTime": end_time,
+                "maxResults": page_size,
+                "resultOffset": offset,
+            }
+            if query:
+                params["query"] = query
+            data = await self._get("/audits", params=params)
+            page = data.get("items", [])
+            items.extend(page)
+            if len(page) < page_size:
+                break
+            if len(items) >= max_scan:
+                truncated = True
+                break
+            offset += page_size
+
+        items.sort(key=lambda item: item.get("timestamp", ""), reverse=True)
+        return {
+            "items": items[:limit],
+            "total_matched_in_range": len(items),
+            "truncated": truncated,
+            "time_range_defaulted": time_range_defaulted,
+            "effective_range": {"start": start_time, "end": end_time},
         }
-        if filters:
-            params["query"] = ";".join(filters)
-        data = await self._get("/audits", params=params)
-        return data.get("items", [])
 
     # ── Service / role management ─────────────────────────────────────────────
 

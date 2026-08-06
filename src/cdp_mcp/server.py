@@ -226,9 +226,20 @@ async def get_alerts(
     start_time: str | None = None,
     end_time: str | None = None,
     limit: int = 50,
+    max_scan: int = 10000,
 ) -> str:
     """
     Get cluster alert events from Cloudera Manager.
+
+    Paginates internally to cover the full [start_time, end_time] window
+    rather than silently stopping at `limit` (on an active cluster, a single
+    capped request can cover only a small fraction of a wide range). Check
+    the response's "truncated" field: true means max_scan raw events were
+    fetched before the full range was covered, so the result may be missing
+    older in-range events -- raise max_scan or narrow the range if so.
+    "time_range_defaulted": true means start_time/end_time were omitted and
+    defaulted to the last hour -- check "effective_range" for what was
+    actually queried.
 
     Args:
       cluster_name: Cluster name.
@@ -237,6 +248,7 @@ async def get_alerts(
       start_time:   ISO 8601 start time (default: 1 hour ago).
       end_time:     ISO 8601 end time (default: now).
       limit:        Maximum number of events to return (default 50).
+      max_scan:     Safety cap on raw events scanned while paginating (default 10000).
     """
     client = _pool.get_client_for_cluster(cluster_name)
     if client is None:
@@ -250,6 +262,7 @@ async def get_alerts(
                 start_time=start_time,
                 end_time=end_time,
                 limit=limit,
+                max_scan=max_scan,
             )
         )
     except Exception as exc:
@@ -266,6 +279,10 @@ async def get_service_metrics(
 ) -> str:
     """
     Query time-series metrics for a service via the CM tsquery API.
+    Response: {"items": [...], "time_range_defaulted": bool, "effective_range": {...}}.
+    "time_range_defaulted": true means start_time/end_time were omitted and
+    silently defaulted to the last hour -- check "effective_range" for what
+    was actually queried before assuming this covers a longer period.
 
     Args:
       cluster_name: Cluster name.
@@ -303,6 +320,9 @@ async def get_host_metrics(
     Query time-series metrics for a single host (CPU, memory, disk, network)
     via the CM tsquery API. Use list_available_metrics() to discover metric
     names first if unsure what to pass.
+    Response: {"items": [...], "time_range_defaulted": bool, "effective_range": {...}}.
+    "time_range_defaulted": true means start_time/end_time were omitted and
+    silently defaulted to the last hour.
 
     Args:
       cluster_name: Cluster the host belongs to (used to pick the right CM instance).
@@ -328,16 +348,34 @@ async def get_host_metrics(
 
 
 @mcp.tool()
-async def list_available_metrics(name_contains: str | None = None) -> str:
+async def list_available_metrics(
+    name_contains: str | None = None,
+    cluster_name: str | None = None,
+) -> str:
     """
     Discover available CM metric names/descriptions for use with
-    get_service_metrics() and get_host_metrics(). Queries the first
-    available CM environment (metric schema is CM-instance-wide, not
-    per-cluster).
+    get_service_metrics() and get_host_metrics(). Metric schema is
+    CM-instance-wide, not per-cluster -- but in a registry with multiple CM
+    instances/environments, different instances can expose different schemas
+    (different CM/CDH versions, different installed services). Pass
+    cluster_name to scope this to the CM instance that actually manages the
+    cluster you're querying metrics for; without it, this silently queries
+    whichever CM environment happens to be registered first, which may not
+    match your target cluster in a multi-instance deployment.
 
     Args:
       name_contains: Optional case-insensitive substring filter (e.g. "cpu").
+      cluster_name:  If set, scope to the CM instance managing this cluster.
     """
+    if cluster_name:
+        client = _pool.get_client_for_cluster(cluster_name)
+        if client is None:
+            return _no_client(cluster_name)
+        try:
+            return _dump(await client.list_available_metrics(name_contains=name_contains))
+        except Exception as exc:
+            return _dump({"error": str(exc)})
+
     for env_name in _pool.list_environments():
         client = _pool.get_client_for_environment(env_name)
         if client is None:
@@ -362,13 +400,16 @@ async def list_impala_queries(
     List Impala queries via Cloudera Manager's own query monitoring (no
     SPNEGO required, unlike the direct Impala/YARN service UIs). Useful for
     finding slow or stuck queries.
+    Response: {"items": [...], "time_range_defaulted": bool, "effective_range": {...}}.
+    service_name is required (this is service-scoped, not cluster-wide) --
+    get it from list_services().
 
     Args:
       cluster_name: Cluster name.
-      service_name: Impala service name.
+      service_name: Impala service name (required -- see list_services()).
       filter_str:   CM filter expression, e.g. "user=root" or
                      "query_duration > 5s and (user=root or user=alice)".
-      start_time:   ISO 8601 start time (default: 5 min before end_time).
+      start_time:   ISO 8601 start time (default: 1 hour before end_time).
       end_time:     ISO 8601 end time (default: now).
       limit:        Maximum queries to return (default 50).
     """
@@ -576,6 +617,12 @@ async def get_cluster_utilization(
     """
     Get aggregated CPU/memory utilization for a cluster (capacity planning).
 
+    Ranges over 29 days are automatically split into multiple CM calls and
+    merged (CM itself hard-rejects any single request wider than 30 days) --
+    check "chunked"/"num_chunks" in the response if you need to know this
+    happened. "time_range_defaulted": true means start_time/end_time were
+    omitted and silently defaulted to the last hour.
+
     Args:
       cluster_name: Cluster name.
       start_time:   ISO 8601 start time.
@@ -598,11 +645,17 @@ async def get_cluster_utilization(
 async def list_replication_schedules(cluster_name: str, service_name: str) -> str:
     """
     List replication schedules for a service (HDFS/Hive replication jobs)
-    with their last-run status.
+    with their last-run status. Each schedule already embeds a recent
+    "history" array -- check that before calling get_replication_history()
+    separately, it may already have what you need.
+
+    service_name is required (this is service-scoped despite the name --
+    get it from list_services()); there is no single call that returns
+    replication schedules across all services on a cluster.
 
     Args:
       cluster_name: Cluster name.
-      service_name: Service name (e.g. HDFS, HIVE).
+      service_name: Service name (required -- e.g. HDFS, HIVE; see list_services()).
     """
     client = _pool.get_client_for_cluster(cluster_name)
     if client is None:
@@ -672,9 +725,17 @@ async def get_audit_events(
     service_name: str | None = None,
     user_name: str | None = None,
     limit: int = 50,
+    max_scan: int = 10000,
 ) -> str:
     """
     Retrieve CM audit events (login, config changes, command executions).
+
+    Paginates internally to cover the full [start_time, end_time] window
+    rather than silently stopping at `limit`. Check the response's
+    "truncated" field: true means max_scan events were fetched before the
+    full range was covered. "time_range_defaulted": true means
+    start_time/end_time were omitted and defaulted to the last hour -- check
+    "effective_range" for what was actually queried.
 
     Args:
       cluster_name: If set, scope to this cluster.
@@ -683,6 +744,7 @@ async def get_audit_events(
       service_name: Filter by service name.
       user_name:    Filter by user who performed the action.
       limit:        Maximum events to return (default 50).
+      max_scan:     Safety cap on events scanned while paginating (default 10000).
     """
     if cluster_name:
         client = _pool.get_client_for_cluster(cluster_name)
@@ -707,6 +769,7 @@ async def get_audit_events(
                 service_name=service_name,
                 user_name=user_name,
                 limit=limit,
+                max_scan=max_scan,
             )
         )
     except Exception as exc:

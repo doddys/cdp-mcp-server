@@ -48,7 +48,8 @@ async def test_get_host_metrics(client):
         return_value=httpx.Response(200, json={"items": [{"metric": "cpu_percent"}]})
     )
     result = await client.get_host_metrics("host1.example.com", ["cpu_percent"])
-    assert result == [{"metric": "cpu_percent"}]
+    assert result["items"] == [{"metric": "cpu_percent"}]
+    assert result["time_range_defaulted"] is True
     sent_body = route.calls[0].request.content
     assert b"host1.example.com" in sent_body
 
@@ -144,7 +145,8 @@ async def test_get_impala_queries(client):
     result = await client.get_impala_queries(
         "My Cluster", "impala", filter_str="user=root"
     )
-    assert result == [{"queryId": "abc123", "user": "root"}]
+    assert result["items"] == [{"queryId": "abc123", "user": "root"}]
+    assert result["time_range_defaulted"] is True
     sent_params = route.calls[0].request.url.params
     assert sent_params["filter"] == "user=root"
 
@@ -156,7 +158,50 @@ async def test_get_cluster_utilization(client):
         return_value=httpx.Response(200, json={"clusterUtilization": []})
     )
     result = await client.get_cluster_utilization("My Cluster")
-    assert result == {"clusterUtilization": []}
+    assert result["clusterUtilization"] == []
+    assert result["chunked"] is False
+    assert result["num_chunks"] == 1
+    assert result["time_range_defaulted"] is True
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_cluster_utilization_chunks_over_29_days(client):
+    route = respx.get(f"{BASE}/clusters/My%20Cluster/utilization")
+    route.side_effect = [
+        httpx.Response(
+            200,
+            json={
+                "totalCpuCores": 100,
+                "avgCpuUtilization": 10.0,
+                "maxCpuUtilization": 50.0,
+                "maxCpuUtilizationTimestampMs": 111,
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "totalCpuCores": 120,
+                "avgCpuUtilization": 20.0,
+                "maxCpuUtilization": 90.0,
+                "maxCpuUtilizationTimestampMs": 222,
+            },
+        ),
+    ]
+    result = await client.get_cluster_utilization(
+        "My Cluster", start_time="2026-01-01T00:00:00Z", end_time="2026-02-05T00:00:00Z"
+    )
+    assert route.call_count == 2
+    assert result["chunked"] is True
+    assert result["num_chunks"] == 2
+    # max* takes the true max across chunks, carrying its own timestamp
+    assert result["maxCpuUtilization"] == 90.0
+    assert result["maxCpuUtilizationTimestampMs"] == 222
+    # avg* is duration-weighted, not a naive mean of the two chunk averages
+    assert 10.0 < result["avgCpuUtilization"] < 20.0
+    # non-avg/max fields fall back to the most recent chunk
+    assert result["totalCpuCores"] == 120
+    assert result["time_range_defaulted"] is False
 
 
 @respx.mock
@@ -258,3 +303,75 @@ async def test_get_service_logs_truncates_client_side(client):
     assert result["nn1"] == [f"line {i}" for i in range(995, 1000)]
     # no "lines" (or any) query param sent -- it doesn't do anything server-side
     assert route.calls[0].request.url.params == httpx.QueryParams()
+
+
+def _event(i: int, cluster: str = "My Cluster") -> dict:
+    return {
+        "timeOccurred": f"2026-01-01T00:{i:02d}:00Z",
+        "attributes": [{"name": "CLUSTER_DISPLAY_NAME", "values": [cluster]}],
+    }
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_alerts_paginates_until_partial_page(client):
+    page1 = [_event(i) for i in range(100)]
+    page2 = [_event(i) for i in range(30)]
+    route = respx.get(f"{BASE}/events")
+    route.side_effect = [
+        httpx.Response(200, json={"items": page1}),
+        httpx.Response(200, json={"items": page2}),
+    ]
+    result = await client.get_alerts("My Cluster", start_time="2026-01-01T00:00:00Z")
+    assert route.call_count == 2
+    assert result["total_matched_in_range"] == 130
+    assert result["truncated"] is False
+    assert result["time_range_defaulted"] is False
+    assert len(result["items"]) == 50  # default limit
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_alerts_truncated_at_max_scan(client):
+    page1 = [_event(i) for i in range(100)]
+    route = respx.get(f"{BASE}/events").mock(
+        return_value=httpx.Response(200, json={"items": page1})
+    )
+    result = await client.get_alerts("My Cluster", limit=10, max_scan=100)
+    assert route.call_count == 1  # stopped at max_scan, never fetched a 2nd page
+    assert result["truncated"] is True
+    assert result["total_matched_in_range"] == 100
+    assert len(result["items"]) == 10
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_alerts_time_range_defaulted_flag(client):
+    respx.get(f"{BASE}/events").mock(
+        return_value=httpx.Response(200, json={"items": []})
+    )
+    result = await client.get_alerts("My Cluster")
+    assert result["time_range_defaulted"] is True
+
+
+def _audit(i: int) -> dict:
+    return {"timestamp": f"2026-01-01T00:{i:02d}:00Z", "username": "u"}
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_audit_events_paginates_until_partial_page(client):
+    page1 = [_audit(i) for i in range(100)]
+    page2 = [_audit(i) for i in range(5)]
+    route = respx.get(f"{BASE}/audits")
+    route.side_effect = [
+        httpx.Response(200, json={"items": page1}),
+        httpx.Response(200, json={"items": page2}),
+    ]
+    result = await client.get_audit_events(
+        "My Cluster", start_time="2026-01-01T00:00:00Z", limit=1000
+    )
+    assert route.call_count == 2
+    assert result["total_matched_in_range"] == 105
+    assert result["truncated"] is False
+    assert len(result["items"]) == 105
