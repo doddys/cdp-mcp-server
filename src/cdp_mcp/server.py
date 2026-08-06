@@ -642,27 +642,49 @@ async def get_cluster_utilization(
 
 
 @mcp.tool()
-async def list_replication_schedules(cluster_name: str, service_name: str) -> str:
+async def list_replication_schedules(
+    cluster_name: str,
+    service_name: str,
+    max_schedules: int | None = None,
+    max_commands: int = 1,
+    view: str = "summary",
+) -> str:
     """
-    List replication schedules for a service (HDFS/Hive replication jobs)
-    with their last-run status. Each schedule already embeds a recent
-    "history" array -- check that before calling get_replication_history()
-    separately, it may already have what you need.
+    List replication schedules for a service (HDFS/Hive/etc replication jobs).
 
-    service_name is required (this is service-scoped despite the name --
-    get it from list_services()); there is no single call that returns
-    replication schedules across all services on a cluster.
+    Use this for discovery (schedule ids/names/type/last-run status), NOT for
+    full run history. It caps embedded recent history at max_commands=1 by
+    default so the response stays small; call get_replication_history() (raw
+    per-run detail) or get_replication_metrics() (aggregated over a window) for
+    actual execution history.
+
+    service_name is required (service-scoped despite the name -- get it from
+    list_services()); there is no single call that returns replication schedules
+    across all services on a cluster.
+
+    Check the response's "truncated" field: true means max_schedules was hit and
+    more schedules exist -- raise max_schedules if so.
 
     Args:
-      cluster_name: Cluster name.
-      service_name: Service name (required -- e.g. HDFS, HIVE; see list_services()).
+      cluster_name:  Cluster name.
+      service_name:  Service name (required -- e.g. HDFS, HIVE; see list_services()).
+      max_schedules: Optional cap on number of schedules returned (default: all).
+      max_commands:  Embedded recent-history runs per schedule (default 1; CM
+                     default 0 = unlimited, which can exceed the tool-result cap).
+      view:          "summary" (default) or "full" for more per-run detail.
     """
     client = _pool.get_client_for_cluster(cluster_name)
     if client is None:
         return _no_client(cluster_name)
     try:
         return _dump(
-            await client.list_replication_schedules(cluster_name, service_name)
+            await client.list_replication_schedules(
+                cluster_name,
+                service_name,
+                max_schedules=max_schedules,
+                max_commands=max_commands,
+                view=view,
+            )
         )
     except Exception as exc:
         return _dump({"error": str(exc)})

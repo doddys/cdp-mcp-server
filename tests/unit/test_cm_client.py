@@ -207,13 +207,43 @@ async def test_get_cluster_utilization_chunks_over_29_days(client):
 @respx.mock
 @pytest.mark.asyncio
 async def test_list_replication_schedules(client):
-    respx.get(
+    route = respx.get(
         f"{BASE}/clusters/My%20Cluster/services/hdfs/replications"
     ).mock(
-        return_value=httpx.Response(200, json={"items": [{"id": 1}]})
+        return_value=httpx.Response(200, json={"items": [{"id": 1}, {"id": 2}]})
     )
     result = await client.list_replication_schedules("My Cluster", "hdfs")
-    assert result == [{"id": 1}]
+    # Defaults: view=summary, maxCommands=1 (capped to keep response small).
+    assert route.calls.last.request.url.params["view"] == "summary"
+    assert route.calls.last.request.url.params["maxCommands"] == "1"
+    assert "maxSchedules" not in route.calls.last.request.url.params
+    assert result["items"] == [{"id": 1}, {"id": 2}]
+    assert result["count"] == 2
+    assert result["truncated"] is False
+    assert result["applied_limits"] == {
+        "maxSchedules": None,
+        "maxCommands": 1,
+        "view": "summary",
+    }
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_replication_schedules_truncated(client):
+    route = respx.get(
+        f"{BASE}/clusters/My%20Cluster/services/hdfs/replications"
+    ).mock(
+        return_value=httpx.Response(
+            200, json={"items": [{"id": i} for i in range(5)]}
+        )
+    )
+    result = await client.list_replication_schedules(
+        "My Cluster", "hdfs", max_schedules=5
+    )
+    assert route.calls.last.request.url.params["maxSchedules"] == "5"
+    # Returned exactly the cap -> more may exist.
+    assert result["count"] == 5
+    assert result["truncated"] is True
 
 
 @respx.mock

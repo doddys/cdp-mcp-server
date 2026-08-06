@@ -325,12 +325,46 @@ class ClouderaManagerClient:
         return merged
 
     async def list_replication_schedules(
-        self, cluster_name: str, service_name: str
-    ) -> list[dict]:
+        self,
+        cluster_name: str,
+        service_name: str,
+        max_schedules: int | None = None,
+        max_commands: int = 1,
+        view: str = "summary",
+    ) -> dict[str, Any]:
+        """
+        List replication schedules for a service -- use this for discovery
+        (schedule ids/names/type), not for full run history.
+
+        CM defaults to maxCommands=0 (unlimited embedded recent history), which
+        pushes HDFS/Hive responses past the MCP tool-result cap on services with
+        many schedules (confirmed live). We cap maxCommands=1 by default so the
+        response stays small; call get_replication_history() or
+        get_replication_metrics() for actual run history over a time window.
+
+        Server-side caps (CM v32+; confirmed live on v51): maxSchedules,
+        maxCommands, view (summary|full).
+        """
+        params: dict[str, Any] = {"view": view, "maxCommands": max_commands}
+        if max_schedules is not None:
+            params["maxSchedules"] = max_schedules
         data = await self._get(
-            f"/clusters/{cluster_name}/services/{service_name}/replications"
+            f"/clusters/{cluster_name}/services/{service_name}/replications",
+            params=params,
         )
-        return data.get("items", [])
+        items = data.get("items", [])
+        # Heuristic: a schedule cap that returned exactly the cap likely has more.
+        truncated = max_schedules is not None and len(items) == max_schedules
+        return {
+            "items": items,
+            "count": len(items),
+            "truncated": truncated,
+            "applied_limits": {
+                "maxSchedules": max_schedules,
+                "maxCommands": max_commands,
+                "view": view,
+            },
+        }
 
     async def get_replication_history(
         self,
