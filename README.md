@@ -2,7 +2,9 @@
 
 MCP (Model Context Protocol) server for Cloudera Manager / CDP cluster administration and troubleshooting.
 
-Fork of [dvergari/cloudera-mcp-server](https://github.com/dvergari/cloudera-mcp-server) — extended with pluggable registry backends (File, Env, Iceberg), additional service clients (YARN, Spark History Server, HDFS NameNode, Oozie), role/metric/security/replication/Impala monitoring tools, SOCKS5 proxy support, and clean SPNEGO detection with per-cluster short-circuiting.
+Based on [Davide Isoardi's cdp-mcp-server](https://github.com/disoardi/cdp-mcp-server), itself a fork of [dvergari/cloudera-mcp-server](https://github.com/dvergari/cloudera-mcp-server) — Apache 2.0. Doddy Sebastianus is extending the functionality.
+
+The codebase builds on the original fork with pluggable registry backends (File, Env, Iceberg), additional service clients (YARN, Spark History Server, HDFS NameNode, Oozie), role/metric/security/replication/Impala monitoring tools, SOCKS5 proxy support, and clean SPNEGO detection with per-cluster short-circuiting.
 
 ## Quick Start (general purpose — no Iceberg required)
 
@@ -10,7 +12,7 @@ Fork of [dvergari/cloudera-mcp-server](https://github.com/dvergari/cloudera-mcp-
 
 ```bash
 # Install
-git clone https://github.com/disoardi/cdp-mcp-server.git
+git clone https://github.com/doddys/cdp-mcp-server.git
 cd cdp-mcp-server
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -184,5 +186,7 @@ not the downstream service UIs.
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
-Original work © Davide Vergari.
-Modifications © Davide Isoardi.
+
+- Original work © Davide Vergari ([dvergari/cloudera-mcp-server](https://github.com/dvergari/cloudera-mcp-server))
+- Fork & extensions © Davide Isoardi ([disoardi/cdp-mcp-server](https://github.com/disoardi/cdp-mcp-server))
+- Further extensions © Doddy Sebastianus

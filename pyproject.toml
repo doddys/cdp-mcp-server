@@ -11,8 +11,9 @@ license = { file = "LICENSE" }
 requires-python = ">=3.11"
 
 authors = [
-    { name = "Daniele Isoardi" },
     { name = "Davide Vergari" },
+    { name = "Davide Isoardi" },
+    { name = "Doddy Sebastianus" },
 ]
 
 keywords = ["cloudera", "cdp", "mcp", "llm", "ai", "devops"]

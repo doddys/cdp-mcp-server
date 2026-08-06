@@ -1,42 +1,42 @@
 # CLAUDE.md — cdp-mcp-server
 
-MCP server Python per amministrazione e troubleshooting cluster Cloudera/CDP.
-Fork di [dvergari/cloudera-mcp-server](https://github.com/dvergari/cloudera-mcp-server) — Apache 2.0.
+Python MCP server for Cloudera/CDP cluster administration and troubleshooting.
+Fork of [dvergari/cloudera-mcp-server](https://github.com/dvergari/cloudera-mcp-server) — Apache 2.0.
 
 ---
 
-## Direttive generali
+## General directives
 
-### Python e tooling
-- Usa **poetry** per la gestione del virtualenv e delle dipendenze (NON uv, NON pip diretto).
-- Il virtualenv è in `.venv/` (in-project). Creato con `python3.12 -m venv .venv` e poi `poetry env use .venv/bin/python`.
-- Per installare: `.venv/bin/pip install -e ".[dev]"` (il pyproject.toml usa poetry-core come build backend).
-- Per eseguire comandi nel venv: `.venv/bin/python`, `.venv/bin/pytest`, `.venv/bin/ruff`, ecc.
+### Python and tooling
+- Use **poetry** for virtualenv and dependency management (NOT uv, NOT direct pip).
+- The virtualenv lives in `.venv/` (in-project). Create it with `python3.12 -m venv .venv` then `poetry env use .venv/bin/python`.
+- To install: `.venv/bin/pip install -e ".[dev]"` (pyproject.toml uses poetry-core as the build backend).
+- To run commands in the venv: `.venv/bin/python`, `.venv/bin/pytest`, `.venv/bin/ruff`, etc.
 
-### Git e GitHub
-- Repo personale pubblico su **github.com** (NON github.dxc.com che è aziendale).
-- Usa sempre `GH_HOST=github.com gh ...` per tutti i comandi `gh` in questo progetto.
-- Non committare mai credenziali o file con dati reali.
-- File di configurazione con credenziali → creare sempre `*.example` su git, il file reale nel `.gitignore`.
-- Non aggiungere riferimenti a ambienti o host reali nel repository.
+### Git and GitHub
+- Public personal repo on **github.com** (NOT github.dxc.com, which is corporate).
+- Always use `GH_HOST=github.com gh ...` for all `gh` commands in this project.
+- Never commit credentials or files with real data.
+- Config files with credentials → always commit a `*.example`, and put the real file in `.gitignore`.
+- Do not add references to real environments or hosts in the repository.
 
-### Sessioni di lavoro
-- Salva sessioni in `./.claude/sessions/` (path locale del progetto, NON in ~/.claude).
-- Usa la skill `save-session` a fine sessione e `load-session` all'inizio.
+### Work sessions
+- Save sessions in `./.claude/sessions/` (project-local path, NOT in ~/.claude).
+- Use the `save-session` skill at the end of a session and `load-session` at the start.
 
-### Licenza
-Apache License 2.0 — stessa del repo originale di dvergari.
+### License
+Apache License 2.0 — same as the original dvergari repo.
 
 ---
 
-## Setup rapido
+## Quick setup
 
 ```bash
 # Clone
-git clone https://github.com/disoardi/cdp-mcp-server.git
+git clone https://github.com/doddys/cdp-mcp-server.git
 cd cdp-mcp-server
 
-# Virtualenv Python 3.12
+# Python 3.12 virtualenv
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -44,30 +44,30 @@ pip install -e ".[dev]"
 # Config
 cp .env.example .env
 cp cm_instances.yaml.example cm_instances.yaml
-# Modifica cm_instances.yaml con le credenziali del cluster di test
+# Edit cm_instances.yaml with your test cluster credentials
 
-# Avvio (FileRegistry)
+# Start (FileRegistry)
 REGISTRY_BACKEND=file cdp-mcp
 
-# Avvio rapido (EnvRegistry — singolo CM)
+# Quick start (EnvRegistry — single CM)
 REGISTRY_BACKEND=env CM_HOST=cm.example.com CM_USERNAME=admin CM_PASSWORD=changeme CM_USE_TLS=false cdp-mcp
 ```
 
 ---
 
-## Struttura del codice
+## Code structure
 
 ```
 src/cdp_mcp/
-├── server.py            ← entry point FastMCP, @mcp.tool() definitions
+├── server.py            ← FastMCP entry point, @mcp.tool() definitions
 ├── config.py            ← Pydantic settings + build_registry() factory
-├── cm_client.py         ← httpx async client per CM API (NON toccare senza motivo)
-├── cm_pool.py           ← connection pool multi-CM + auto-discovery endpoint
+├── cm_client.py         ← httpx async client for CM API (do not modify without reason)
+├── cm_pool.py           ← multi-CM connection pool + auto-discovery endpoint
 ├── registry/
 │   ├── base.py          ← BaseRegistry ABC: start/stop/get_all/register/deactivate
-│   ├── iceberg.py       ← IcebergRegistry (codice originale dvergari)
-│   ├── file_registry.py ← FileRegistry (YAML con interpolazione env)
-│   └── env_registry.py  ← EnvRegistry (singolo CM da CM_HOST/CM_PORT/ecc.)
+│   ├── iceberg.py       ← IcebergRegistry (original dvergari code)
+│   ├── file_registry.py ← FileRegistry (YAML with env interpolation)
+│   └── env_registry.py ← EnvRegistry (single CM from CM_HOST/CM_PORT/etc.)
 └── clients/
     ├── yarn_client.py   ← YARN ResourceManager REST API (:8088)
     ├── spark_client.py  ← Spark History Server REST API (:18088)
@@ -75,64 +75,64 @@ src/cdp_mcp/
     └── oozie_client.py  ← Oozie REST API (:11000)
 
 tests/
-├── unit/                ← Test unitari (mock httpx con respx, no dipendenze esterne)
-└── integration/         ← Test di integrazione (WireMock via docker-compose)
+├── unit/                ← Unit tests (httpx mocked with respx, no external dependencies)
+└── integration/         ← Integration tests (WireMock via docker-compose)
     ├── docker-compose.yml
-    ├── wiremock/        ← Stub definitions per CM, YARN, HDFS, Spark
-    └── cm_instances.yaml  ← Gitignored — configurazione locale per i test
+    ├── wiremock/        ← Stub definitions for CM, YARN, HDFS, Spark
+    └── cm_instances.yaml  ← Gitignored — local config for tests
 ```
 
 ---
 
-## Regole architetturali
+## Architectural rules
 
-### 1. Non toccare cm_client.py senza motivo
-`cm_client.py` è il codice originale di dvergari, testato e funzionante. Modifiche solo per bug fix o estensioni strettamente necessarie.
+### 1. Do not modify cm_client.py without reason
+`cm_client.py` is dvergari's original code, tested and working. Modify only for bug fixes or strictly necessary extensions.
 
-### 2. I nuovi client seguono lo stesso pattern di cm_client.py
-Ogni client in `clients/` deve:
-- Usare `httpx.AsyncClient` con timeout esplicito
-- Avere retry via `tenacity` per `TransportError` e 503/504
-- Avere la stessa gerarchia di eccezioni: `XxxClientError → XxxAuthError → XxxNotFoundError → XxxServiceUnavailable`
-- Loggare con `structlog`
-- Non lanciare mai eccezioni non tipizzate verso `server.py`
+### 2. New clients follow the same pattern as cm_client.py
+Every client in `clients/` must:
+- Use `httpx.AsyncClient` with an explicit timeout
+- Have retries via `tenacity` for `TransportError` and 503/504
+- Have the same exception hierarchy: `XxxClientError → XxxAuthError → XxxNotFoundError → XxxServiceUnavailable`
+- Log with `structlog`
+- Never throw untyped exceptions toward `server.py`
 
-### 3. Auto-discovery, non configurazione manuale
-Gli endpoint YARN/Spark/Oozie/HDFS vengono scoperti da CM all'avvio in `cm_pool.py → _discover_service_endpoints()`. Non aggiungere env var per questi URL. Override accettabile: `endpoints_override` in `cm_instances.yaml`.
+### 3. Auto-discovery, not manual configuration
+YARN/Spark/Oozie/HDFS endpoints are discovered from CM at startup in `cm_pool.py → _discover_service_endpoints()`. Do not add env vars for these URLs. Acceptable override: `endpoints_override` in `cm_instances.yaml`.
 
-### 4. I tool in server.py sono read-mostly
-I nuovi tool troubleshooting (YARN, Spark, HDFS, Oozie) sono tutti **read-only**. Tool di modifica richiedono discussione esplicita.
+### 4. Tools in server.py are read-mostly
+New troubleshooting tools (YARN, Spark, HDFS, Oozie) are all **read-only**. Mutating tools require explicit discussion.
 
-### 5. Fallback puliti sui tool applicativi
-Se un endpoint non è scoperto → messaggio JSON strutturato, mai traceback.
+### 5. Clean fallbacks on application tools
+If an endpoint is not discovered → return a structured JSON message, never a traceback.
 
 ### 6. Registry backend
-| Backend | Uso | Richiede |
-|---------|-----|---------|
-| `file` | sviluppo, team piccoli | `cm_instances.yaml` |
-| `env` | singolo CM, smoke test | env var `CM_HOST`, `CM_USERNAME`, `CM_PASSWORD` |
-| `iceberg` | CDP con Impala/Iceberg | Impala/HiveServer2 + tabella Iceberg |
+| Backend | Use case | Requires |
+|---------|----------|---------|
+| `file` | development, small teams | `cm_instances.yaml` |
+| `env` | single CM, smoke test | env vars `CM_HOST`, `CM_USERNAME`, `CM_PASSWORD` |
+| `iceberg` | CDP with Impala/Iceberg | Impala/HiveServer2 + Iceberg table |
 
-Default: `iceberg` (retrocompatibilità dvergari). Per sviluppo usare `file` o `env`.
+Default: `iceberg` (dvergari backward compatibility). For development use `file` or `env`.
 
 ---
 
-## Comandi utili
+## Useful commands
 
 ```bash
-# Run in sviluppo (stdio)
+# Run in development (stdio)
 REGISTRY_BACKEND=file cdp-mcp
 
-# Test unitari (nessuna dipendenza esterna)
+# Unit tests (no external dependencies)
 .venv/bin/pytest tests/unit/ -v
 
-# Test integrazione (richiede docker compose up)
+# Integration tests (requires docker compose up)
 docker compose -f tests/integration/docker-compose.yml up -d
 REGISTRY_BACKEND=file REGISTRY_FILE_PATH=tests/integration/cm_instances.yaml \
   .venv/bin/pytest tests/integration/ -v
 docker compose -f tests/integration/docker-compose.yml down
 
-# Smoke test manuale (singolo tool via stdin)
+# Manual smoke test (single tool via stdin)
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_clusters","arguments":{}}}' \
   | REGISTRY_BACKEND=env CM_HOST=fake CM_USERNAME=x CM_PASSWORD=x cdp-mcp
 
@@ -143,9 +143,9 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_clust
 
 ---
 
-## Configurazione Claude Desktop
+## Claude Desktop configuration
 
-### FileRegistry (consigliato per sviluppo)
+### FileRegistry (recommended for development)
 ```json
 {
   "mcpServers": {
@@ -160,7 +160,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_clust
 }
 ```
 
-### EnvRegistry (singolo CM, setup minimo)
+### EnvRegistry (single CM, minimal setup)
 ```json
 {
   "mcpServers": {
@@ -180,32 +180,30 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_clust
 
 ---
 
-## Documentazione GitHub Pages
-- La documentazione va in `docs/gh-pages/`.
-- Quando è pronta una prima release stabile, genera la documentazione.
-- Branch `gh-pages` dedicato per il deploy.
+## GitHub Pages documentation
+- Documentation goes in `docs/gh-pages/`.
+- When a first stable release is ready, generate the documentation.
+- Dedicated `gh-pages` branch for deployment.
 
-## Kerberos (out of scope MVP)
-Per cluster CDP con Kerberos/SPNEGO usare `httpx-gssapi`. Da implementare come opzione `CM_KERBEROS=true`.
+## Kerberos (out of scope for MVP)
+For CDP clusters with Kerberos/SPNEGO use `httpx-gssapi`. To be implemented as a `CM_KERBEROS=true` option.
 
-### TODO — SPNEGO per i client downstream (YARN/HDFS/Spark/Oozie)
-`cm_client.py` usa Basic auth verso CM e funziona. I client in `clients/` (YARN RM,
-Spark HS, HDFS NameNode JMX, Oozie) non ricevono alcuna credenziale: su cluster
-Kerberizzati le richieste non autenticate tornano una risposta non-JSON (pagina
-HTML di negoziazione o corpo vuoto), che oggi si manifesta come errore di parsing
-JSON generico.
+### TODO — SPNEGO for downstream clients
+`cm_client.py` uses Basic auth against CM and works. The clients in `clients/` (YARN RM,
+Spark HS, HDFS NameNode JMX, Oozie) receive no credentials: on Kerberized clusters
+unauthenticated requests return a non-JSON response (an HTML negotiation page or an
+empty body), which today surfaces as a generic JSON parse error.
 
-- Libreria: `httpx-gssapi` (implementa `httpx.Auth`), da agganciare solo ai
-  quattro client downstream — non a `cm_client.py`.
-- Credenziali da keytab, non da `kinit` interattivo (processo server long-running):
-  `KRB5_CLIENT_KTNAME=/path/to/svc.keytab` + principal dedicato, così gssapi
-  rinnova automaticamente il ticket.
-- Trade-off principale: dipendenza da libreria di sistema (MIT `libkrb5-dev` a
-  build time, `krb5-libs` a runtime) → immagine Docker più pesante.
-- Punto di innesto: `cm_pool.py` (dove vengono istanziati `YarnClient`,
-  `SparkClient`, `HdfsClient`, `OozieClient`) + nuovo flag `CM_KERBEROS=true` in
-  `config.py`.
-- Non implementare senza discussione esplicita (vedi regola architetturale #4).
+- Library: `httpx-gssapi` (implements `httpx.Auth`), to be attached only to the
+  four downstream clients — not to `cm_client.py`.
+- Credentials from a keytab, not interactive `kinit` (long-running server process):
+  `KRB5_CLIENT_KTNAME=/path/to/svc.keytab` + a dedicated principal, so gssapi
+  auto-renews the ticket.
+- Main trade-off: system library dependency (MIT `libkrb5-dev` at build time,
+  `krb5-libs` at runtime) → heavier Docker image.
+- Injection point: `cm_pool.py` (where `YarnClient`, `SparkClient`, `HdfsClient`,
+  `OozieClient` are instantiated) + new `CM_KERBEROS=true` flag in `config.py`.
+- Do not implement without explicit discussion (see architectural rule #4).
 
-## Nota linguaggio futuro
-Il PoC è Python + FastMCP. Se validato, valutare riscrittura in Go per distribuzione come binario statico.
+## Future language note
+The PoC is Python + FastMCP. If validated, consider rewriting in Go for distribution as a static binary.
