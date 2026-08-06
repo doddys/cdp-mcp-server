@@ -5,6 +5,7 @@ import pytest
 import respx
 import httpx
 
+from cdp_mcp.clients.errors import SpnegoRequiredError
 from cdp_mcp.clients.yarn_client import YarnClient, YarnNotFoundError
 
 
@@ -282,3 +283,29 @@ async def test_get_queue_not_found(client):
     )
     result = await client.get_queue("nonexistent")
     assert "error" in result
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_app_follows_https_redirect(client):
+    https_base = "https://rm.example.com:8090"
+    respx.get(f"{BASE}/ws/v1/cluster/apps/application_001").mock(
+        return_value=httpx.Response(
+            302, headers={"Location": f"{https_base}/ws/v1/cluster/apps/application_001"}
+        )
+    )
+    respx.get(f"{https_base}/ws/v1/cluster/apps/application_001").mock(
+        return_value=httpx.Response(200, json={"app": {"id": "application_001"}})
+    )
+    result = await client.get_app("application_001")
+    assert result["app_id"] == "application_001"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_app_spnego_challenge_raises(client):
+    respx.get(f"{BASE}/ws/v1/cluster/apps/application_001").mock(
+        return_value=httpx.Response(401, headers={"WWW-Authenticate": "Negotiate"})
+    )
+    with pytest.raises(SpnegoRequiredError):
+        await client.get_app("application_001")

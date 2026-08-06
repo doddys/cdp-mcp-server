@@ -12,6 +12,8 @@ from tenacity import (
     wait_exponential,
 )
 
+from cdp_mcp.clients.errors import SpnegoRequiredError
+
 log = structlog.get_logger(__name__)
 
 
@@ -65,12 +67,15 @@ class YarnClient:
                 auth=self._auth,
                 timeout=self._timeout,
                 verify=False,  # internal services often self-signed
+                follow_redirects=True,
             ) as client:
                 try:
                     resp = await client.get(path, params=params)
                 except httpx.TransportError:
                     raise
                 if resp.status_code == 401:
+                    if "negotiate" in resp.headers.get("www-authenticate", "").lower():
+                        raise SpnegoRequiredError(f"SPNEGO required for {self._base_url}")
                     raise YarnAuthError(f"YARN auth failed: {self._base_url}")
                 if resp.status_code == 404:
                     raise YarnNotFoundError(f"YARN resource not found: {path}")
@@ -82,7 +87,20 @@ class YarnClient:
                     raise YarnClientError(
                         f"YARN HTTP {resp.status_code}: {resp.text[:200]}"
                     )
-                return resp.json()
+                try:
+                    return resp.json()
+                except ValueError as exc:
+                    log.warning(
+                        "yarn_client.non_json_response",
+                        status=resp.status_code,
+                        content_type=resp.headers.get("content-type"),
+                        body=resp.text[:300],
+                    )
+                    raise YarnClientError(
+                        f"YARN returned non-JSON response (HTTP {resp.status_code}, "
+                        f"content-type={resp.headers.get('content-type')!r}): "
+                        f"{resp.text[:300]!r}"
+                    ) from exc
 
         return await _execute()
 

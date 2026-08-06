@@ -12,6 +12,8 @@ from tenacity import (
     wait_exponential,
 )
 
+from cdp_mcp.clients.errors import SpnegoRequiredError
+
 log = structlog.get_logger(__name__)
 
 
@@ -49,18 +51,35 @@ class HdfsClient:
                 base_url=self._base_url,
                 timeout=self._timeout,
                 verify=False,
+                follow_redirects=True,
             ) as client:
                 try:
                     resp = await client.get("/jmx", params={"qry": qry})
                 except httpx.TransportError:
                     raise
+                if resp.status_code == 401:
+                    if "negotiate" in resp.headers.get("www-authenticate", "").lower():
+                        raise SpnegoRequiredError(f"SPNEGO required for {self._base_url}")
                 if resp.status_code in (503, 504):
                     raise HdfsServiceUnavailable(
                         f"HDFS NN unavailable: {resp.status_code}"
                     )
                 if resp.status_code >= 400:
                     raise HdfsClientError(f"HDFS JMX HTTP {resp.status_code}")
-                return resp.json()
+                try:
+                    return resp.json()
+                except ValueError as exc:
+                    log.warning(
+                        "hdfs_client.non_json_response",
+                        status=resp.status_code,
+                        content_type=resp.headers.get("content-type"),
+                        body=resp.text[:300],
+                    )
+                    raise HdfsClientError(
+                        f"HDFS NN returned non-JSON response (HTTP {resp.status_code}, "
+                        f"content-type={resp.headers.get('content-type')!r}): "
+                        f"{resp.text[:300]!r}"
+                    ) from exc
 
         return await _execute()
 

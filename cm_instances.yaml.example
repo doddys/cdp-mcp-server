@@ -25,7 +25,10 @@ instances:
     use_tls: false                  # Use HTTPS (true) or HTTP (false)
     verify_ssl: false               # Verify TLS certificate (true/false)
     api_version: v51                # CM API version (v40-v54 depending on CM version)
-    timeout_seconds: 30             # HTTP timeout in seconds
+    timeout_seconds: 30             # HTTP timeout in seconds (CM core API calls)
+    downstream_timeout_seconds: 30  # HTTP timeout for YARN/Spark/HDFS/Oozie calls
+    disable_on_spnego: true         # Skip a downstream tool after it hits a SPNEGO
+                                     # challenge, instead of retrying every call
     active: true                    # Set to false to disable without removing
 
   # ── Production CM with TLS ────────────────────────────────────────────────
@@ -38,6 +41,7 @@ instances:
     verify_ssl: true                # Requires valid TLS cert signed by trusted CA
     api_version: v51
     timeout_seconds: 30
+    downstream_timeout_seconds: 30
 
   # ── Knox / CDP Public Cloud load balancer ─────────────────────────────────
   # Use this when CM is behind a Knox gateway (CDP Public Cloud environments).

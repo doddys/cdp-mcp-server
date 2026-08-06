@@ -5,6 +5,7 @@ import pytest
 import respx
 import httpx
 
+from cdp_mcp.clients.errors import SpnegoRequiredError
 from cdp_mcp.clients.spark_client import SparkClient, SparkNotFoundError
 
 
@@ -138,3 +139,29 @@ async def test_list_apps(client):
     assert result[0]["id"] == "application_1234567890_0001"
     # No executorRunTime in compact list
     assert "total_executor_run_time_ms" not in result[0]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_apps_follows_https_redirect(client):
+    https_base = "https://hs.example.com:18488"
+    respx.get(f"{BASE}/api/v1/applications").mock(
+        return_value=httpx.Response(
+            302, headers={"Location": f"{https_base}/api/v1/applications"}
+        )
+    )
+    respx.get(f"{https_base}/api/v1/applications").mock(
+        return_value=httpx.Response(200, json=[SPARK_APP])
+    )
+    result = await client.list_apps()
+    assert len(result) == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_apps_spnego_challenge_raises(client):
+    respx.get(f"{BASE}/api/v1/applications").mock(
+        return_value=httpx.Response(401, headers={"WWW-Authenticate": "Negotiate"})
+    )
+    with pytest.raises(SpnegoRequiredError):
+        await client.list_apps()

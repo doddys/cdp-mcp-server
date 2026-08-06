@@ -10,6 +10,9 @@ Environment variables:
   CM_USE_TLS       — default "false"
   CM_VERIFY_SSL    — default "true"
   CM_API_VERSION   — default "v51"
+  CM_TIMEOUT_SECONDS             — default 30
+  CM_DOWNSTREAM_TIMEOUT_SECONDS  — default 30
+  CM_DISABLE_ON_SPNEGO           — default "true"
 """
 from __future__ import annotations
 
@@ -59,6 +62,11 @@ class EnvRegistry(BaseRegistry):
             use_tls=_bool(os.environ.get("CM_USE_TLS", "false")),
             verify_ssl=_bool(os.environ.get("CM_VERIFY_SSL", "true")),
             api_version=os.environ.get("CM_API_VERSION", "v51"),
+            timeout_seconds=int(os.environ.get("CM_TIMEOUT_SECONDS", "30")),
+            downstream_timeout_seconds=int(
+                os.environ.get("CM_DOWNSTREAM_TIMEOUT_SECONDS", "30")
+            ),
+            disable_on_spnego=_bool(os.environ.get("CM_DISABLE_ON_SPNEGO", "true")),
         )
         self._instance = [settings]
         log.info("env_registry.loaded", host=host)

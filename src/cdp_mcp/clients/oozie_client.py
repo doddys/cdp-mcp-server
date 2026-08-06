@@ -12,6 +12,8 @@ from tenacity import (
     wait_exponential,
 )
 
+from cdp_mcp.clients.errors import SpnegoRequiredError
+
 log = structlog.get_logger(__name__)
 
 _SENSITIVE_KEYS = {
@@ -66,11 +68,15 @@ class OozieClient:
                 base_url=self._base_url,
                 timeout=self._timeout,
                 verify=False,
+                follow_redirects=True,
             ) as client:
                 try:
                     resp = await client.get(path, params=params)
                 except httpx.TransportError:
                     raise
+                if resp.status_code == 401:
+                    if "negotiate" in resp.headers.get("www-authenticate", "").lower():
+                        raise SpnegoRequiredError(f"SPNEGO required for {self._base_url}")
                 if resp.status_code == 404:
                     raise OozieNotFoundError(f"Not found: {path}")
                 if resp.status_code in (503, 504):
@@ -81,7 +87,20 @@ class OozieClient:
                     raise OozieClientError(
                         f"Oozie HTTP {resp.status_code}: {resp.text[:200]}"
                     )
-                return resp.json()
+                try:
+                    return resp.json()
+                except ValueError as exc:
+                    log.warning(
+                        "oozie_client.non_json_response",
+                        status=resp.status_code,
+                        content_type=resp.headers.get("content-type"),
+                        body=resp.text[:300],
+                    )
+                    raise OozieClientError(
+                        f"Oozie returned non-JSON response (HTTP {resp.status_code}, "
+                        f"content-type={resp.headers.get('content-type')!r}): "
+                        f"{resp.text[:300]!r}"
+                    ) from exc
 
         return await _execute()
 

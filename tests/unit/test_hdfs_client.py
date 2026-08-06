@@ -5,6 +5,7 @@ import pytest
 import respx
 import httpx
 
+from cdp_mcp.clients.errors import SpnegoRequiredError
 from cdp_mcp.clients.hdfs_client import HdfsClient
 
 
@@ -114,3 +115,37 @@ async def test_capacity_used_pct_zero_when_total_zero(client):
     )
     result = await client.get_namenode_status()
     assert result["capacity_used_pct"] == 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_namenode_status_follows_https_redirect(client):
+    https_base = "https://nn.example.com:9871"
+    respx.get(f"{BASE}/jmx", params={"qry": "Hadoop:service=NameNode,name=FSNamesystemState"}).mock(
+        return_value=httpx.Response(
+            302, headers={"Location": f"{https_base}/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState"}
+        )
+    )
+    respx.get(f"{https_base}/jmx", params={"qry": "Hadoop:service=NameNode,name=FSNamesystemState"}).mock(
+        return_value=httpx.Response(200, json={"beans": [FS_HEALTHY]})
+    )
+    respx.get(f"{BASE}/jmx", params={"qry": "Hadoop:service=NameNode,name=NameNodeStatus"}).mock(
+        return_value=httpx.Response(
+            302, headers={"Location": f"{https_base}/jmx?qry=Hadoop:service=NameNode,name=NameNodeStatus"}
+        )
+    )
+    respx.get(f"{https_base}/jmx", params={"qry": "Hadoop:service=NameNode,name=NameNodeStatus"}).mock(
+        return_value=httpx.Response(200, json={"beans": [NN_STATUS]})
+    )
+    result = await client.get_namenode_status()
+    assert result["health_summary"] == "HEALTHY"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_namenode_status_spnego_challenge_raises(client):
+    respx.get(f"{BASE}/jmx", params={"qry": "Hadoop:service=NameNode,name=FSNamesystemState"}).mock(
+        return_value=httpx.Response(401, headers={"WWW-Authenticate": "Negotiate"})
+    )
+    with pytest.raises(SpnegoRequiredError):
+        await client.get_namenode_status()

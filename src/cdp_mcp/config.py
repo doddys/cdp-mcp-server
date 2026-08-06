@@ -22,6 +22,8 @@ class ClouderaManagerSettings:
     verify_ssl: bool = True
     api_version: str = "v51"
     timeout_seconds: int = 30
+    downstream_timeout_seconds: int = 30
+    disable_on_spnego: bool = True
     environment_name: str = "default"
     active: bool = True
     use_knox: bool = False

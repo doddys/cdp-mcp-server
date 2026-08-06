@@ -12,6 +12,7 @@ from typing import Any
 import structlog
 from mcp.server.fastmcp import FastMCP
 
+from cdp_mcp.clients.errors import SpnegoRequiredError
 from cdp_mcp.clients.hdfs_client import HdfsClient
 from cdp_mcp.clients.oozie_client import OozieClient, OozieNotFoundError
 from cdp_mcp.clients.spark_client import SparkClient, SparkNotFoundError
@@ -49,6 +50,18 @@ mcp = FastMCP("cdp-mcp", lifespan=_lifespan)
 
 def _dump(data: Any) -> str:
     return json.dumps(data, indent=2, default=str)
+
+
+def _spnego_error(service: str) -> str:
+    return _dump(
+        {
+            "error": (
+                f"SPNEGO required for {service}; skipping "
+                "(disable_on_spnego=true). See CLAUDE.md Kerberos TODO."
+            ),
+            "spnego_required": True,
+        }
+    )
 
 
 def _no_client(cluster_name: str) -> str:
@@ -104,27 +117,102 @@ async def list_services(cluster_name: str) -> str:
 
 
 @mcp.tool()
+async def get_service(cluster_name: str, service_name: str) -> str:
+    """
+    Get detailed status for a single service: healthSummary, healthChecks,
+    serviceState and config staleness. Lighter-weight than list_services when
+    you already know which service to inspect.
+
+    Args:
+      cluster_name: Cluster name.
+      service_name: Service name (e.g. YARN, SPARK_ON_YARN, HDFS, OOZIE).
+    """
+    client = _pool.get_client_for_cluster(cluster_name)
+    if client is None:
+        return _no_client(cluster_name)
+    try:
+        return _dump(await client.get_service(cluster_name, service_name))
+    except Exception as exc:
+        return _dump({"error": str(exc)})
+
+
+@mcp.tool()
+async def list_roles(cluster_name: str, service_name: str) -> str:
+    """
+    List role instances of a service with their status (healthSummary,
+    roleState, commissionState, haStatus) — lighter-weight than
+    get_service_logs when triaging before deciding to pull log content.
+
+    Args:
+      cluster_name: Cluster name.
+      service_name: Service name (e.g. YARN, SPARK_ON_YARN, HDFS, OOZIE).
+    """
+    client = _pool.get_client_for_cluster(cluster_name)
+    if client is None:
+        return _no_client(cluster_name)
+    try:
+        return _dump(await client.list_roles(cluster_name, service_name))
+    except Exception as exc:
+        return _dump({"error": str(exc)})
+
+
+@mcp.tool()
+async def get_role_status(cluster_name: str, service_name: str, role_name: str) -> str:
+    """
+    Get detailed status for a single role instance.
+
+    Args:
+      cluster_name: Cluster name.
+      service_name: Service name.
+      role_name:    Role instance name, as returned by list_roles().
+    """
+    client = _pool.get_client_for_cluster(cluster_name)
+    if client is None:
+        return _no_client(cluster_name)
+    try:
+        return _dump(await client.get_role(cluster_name, service_name, role_name))
+    except Exception as exc:
+        return _dump({"error": str(exc)})
+
+
+@mcp.tool()
 async def get_service_logs(
     cluster_name: str,
     service_name: str,
     max_lines: int = 500,
+    role_name: str | None = None,
+    max_roles: int = 10,
 ) -> str:
     """
-    Retrieve recent log lines for all roles of a service.
+    Retrieve recent log lines for role(s) of a service.
     Returns a dict mapping role_name → list of log lines.
     Useful for diagnosing service failures.
+
+    CM has no server-side way to limit log size -- each role fetch always
+    transfers the complete log file (can be tens of MB); max_lines only
+    trims what's returned, not what's downloaded. Without role_name, this
+    fetches every role of the service -- on services with many roles (e.g.
+    HDFS with many DataNodes) that can take minutes. Prefer passing
+    role_name (from list_roles()) once you know which host/role is
+    relevant. Unfiltered calls are capped at max_roles (default 10);
+    GATEWAY roles are always skipped since they have no logs.
 
     Args:
       cluster_name: Cluster name.
       service_name: Service name (e.g. YARN, SPARK_ON_YARN, HDFS, OOZIE).
       max_lines:    Maximum log lines per role (default 500).
+      role_name:    Fetch logs for just this one role (from list_roles()).
+      max_roles:    Cap on roles fetched when role_name is not given (default 10).
     """
     client = _pool.get_client_for_cluster(cluster_name)
     if client is None:
         return _no_client(cluster_name)
     try:
         return _dump(
-            await client.get_service_logs(cluster_name, service_name, max_lines)
+            await client.get_service_logs(
+                cluster_name, service_name, max_lines,
+                role_name=role_name, max_roles=max_roles,
+            )
         )
     except Exception as exc:
         return _dump({"error": str(exc)})
@@ -197,6 +285,105 @@ async def get_service_metrics(
                 metric_names,
                 start_time=start_time,
                 end_time=end_time,
+            )
+        )
+    except Exception as exc:
+        return _dump({"error": str(exc)})
+
+
+@mcp.tool()
+async def get_host_metrics(
+    cluster_name: str,
+    hostname: str,
+    metric_names: list[str],
+    start_time: str | None = None,
+    end_time: str | None = None,
+) -> str:
+    """
+    Query time-series metrics for a single host (CPU, memory, disk, network)
+    via the CM tsquery API. Use list_available_metrics() to discover metric
+    names first if unsure what to pass.
+
+    Args:
+      cluster_name: Cluster the host belongs to (used to pick the right CM instance).
+      hostname:     Host to query metrics for.
+      metric_names: List of metric names (e.g. ["cpu_percent", "physical_memory_used"]).
+      start_time:   ISO 8601 start time.
+      end_time:     ISO 8601 end time.
+    """
+    client = _pool.get_client_for_cluster(cluster_name)
+    if client is None:
+        return _no_client(cluster_name)
+    try:
+        return _dump(
+            await client.get_host_metrics(
+                hostname,
+                metric_names,
+                start_time=start_time,
+                end_time=end_time,
+            )
+        )
+    except Exception as exc:
+        return _dump({"error": str(exc)})
+
+
+@mcp.tool()
+async def list_available_metrics(name_contains: str | None = None) -> str:
+    """
+    Discover available CM metric names/descriptions for use with
+    get_service_metrics() and get_host_metrics(). Queries the first
+    available CM environment (metric schema is CM-instance-wide, not
+    per-cluster).
+
+    Args:
+      name_contains: Optional case-insensitive substring filter (e.g. "cpu").
+    """
+    for env_name in _pool.list_environments():
+        client = _pool.get_client_for_environment(env_name)
+        if client is None:
+            continue
+        try:
+            return _dump(await client.list_available_metrics(name_contains=name_contains))
+        except Exception as exc:
+            return _dump({"error": str(exc)})
+    return _dump({"error": "No CM clients available."})
+
+
+@mcp.tool()
+async def list_impala_queries(
+    cluster_name: str,
+    service_name: str,
+    filter_str: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    limit: int = 50,
+) -> str:
+    """
+    List Impala queries via Cloudera Manager's own query monitoring (no
+    SPNEGO required, unlike the direct Impala/YARN service UIs). Useful for
+    finding slow or stuck queries.
+
+    Args:
+      cluster_name: Cluster name.
+      service_name: Impala service name.
+      filter_str:   CM filter expression, e.g. "user=root" or
+                     "query_duration > 5s and (user=root or user=alice)".
+      start_time:   ISO 8601 start time (default: 5 min before end_time).
+      end_time:     ISO 8601 end time (default: now).
+      limit:        Maximum queries to return (default 50).
+    """
+    client = _pool.get_client_for_cluster(cluster_name)
+    if client is None:
+        return _no_client(cluster_name)
+    try:
+        return _dump(
+            await client.get_impala_queries(
+                cluster_name,
+                service_name,
+                filter_str=filter_str,
+                start_time=start_time,
+                end_time=end_time,
+                limit=limit,
             )
         )
     except Exception as exc:
@@ -301,6 +488,27 @@ async def get_command_status(command_id: int) -> str:
 
 
 @mcp.tool()
+async def list_cluster_commands(cluster_name: str, limit: int = 20) -> str:
+    """
+    List recent commands executed against a cluster (start/stop/restart,
+    config deploys, upgrades, etc.) with success/failure status. Use this
+    to discover a command_id for get_command_status(), or to see what ran
+    recently without already knowing an ID.
+
+    Args:
+      cluster_name: Cluster name.
+      limit:        Maximum commands to return (default 20).
+    """
+    client = _pool.get_client_for_cluster(cluster_name)
+    if client is None:
+        return _no_client(cluster_name)
+    try:
+        return _dump(await client.list_cluster_commands(cluster_name, limit=limit))
+    except Exception as exc:
+        return _dump({"error": str(exc)})
+
+
+@mcp.tool()
 async def get_host_status(
     cluster_name: str | None = None,
     host_filter: str | None = None,
@@ -338,6 +546,122 @@ async def get_host_status(
             except Exception as exc:
                 results.append({"error": str(exc), "environment": env_name})
     return _dump(results)
+
+
+@mcp.tool()
+async def get_cluster_security_info(cluster_name: str) -> str:
+    """
+    Get TLS and Kerberos status for a cluster. Useful to confirm upfront
+    whether downstream service UIs (YARN RM, Spark HS, HDFS NN, Oozie) will
+    require SPNEGO authentication before calling their tools.
+
+    Args:
+      cluster_name: Cluster name.
+    """
+    client = _pool.get_client_for_cluster(cluster_name)
+    if client is None:
+        return _no_client(cluster_name)
+    try:
+        return _dump(await client.get_cluster_security_info(cluster_name))
+    except Exception as exc:
+        return _dump({"error": str(exc)})
+
+
+@mcp.tool()
+async def get_cluster_utilization(
+    cluster_name: str,
+    start_time: str | None = None,
+    end_time: str | None = None,
+) -> str:
+    """
+    Get aggregated CPU/memory utilization for a cluster (capacity planning).
+
+    Args:
+      cluster_name: Cluster name.
+      start_time:   ISO 8601 start time.
+      end_time:     ISO 8601 end time (default: now).
+    """
+    client = _pool.get_client_for_cluster(cluster_name)
+    if client is None:
+        return _no_client(cluster_name)
+    try:
+        return _dump(
+            await client.get_cluster_utilization(
+                cluster_name, start_time=start_time, end_time=end_time
+            )
+        )
+    except Exception as exc:
+        return _dump({"error": str(exc)})
+
+
+@mcp.tool()
+async def list_replication_schedules(cluster_name: str, service_name: str) -> str:
+    """
+    List replication schedules for a service (HDFS/Hive replication jobs)
+    with their last-run status.
+
+    Args:
+      cluster_name: Cluster name.
+      service_name: Service name (e.g. HDFS, HIVE).
+    """
+    client = _pool.get_client_for_cluster(cluster_name)
+    if client is None:
+        return _no_client(cluster_name)
+    try:
+        return _dump(
+            await client.list_replication_schedules(cluster_name, service_name)
+        )
+    except Exception as exc:
+        return _dump({"error": str(exc)})
+
+
+@mcp.tool()
+async def get_replication_history(
+    cluster_name: str,
+    service_name: str,
+    schedule_id: int,
+    limit: int = 20,
+) -> str:
+    """
+    Get run history for a replication schedule, as returned by
+    list_replication_schedules().
+
+    Args:
+      cluster_name: Cluster name.
+      service_name: Service name (e.g. HDFS, HIVE).
+      schedule_id:  Replication schedule ID.
+      limit:        Maximum history entries to return (default 20).
+    """
+    client = _pool.get_client_for_cluster(cluster_name)
+    if client is None:
+        return _no_client(cluster_name)
+    try:
+        return _dump(
+            await client.get_replication_history(
+                cluster_name, service_name, schedule_id, limit=limit
+            )
+        )
+    except Exception as exc:
+        return _dump({"error": str(exc)})
+
+
+@mcp.tool()
+async def list_parcels(cluster_name: str) -> str:
+    """
+    List parcels (CDH/runtime distribution packages) available to a
+    cluster, with version and activation/distribution stage per host.
+    Useful after upgrades or when suspecting a version mismatch.
+
+    Args:
+      cluster_name: Cluster name.
+    """
+    client = _pool.get_client_for_cluster(cluster_name)
+    if client is None:
+        return _no_client(cluster_name)
+    try:
+        return _dump(await client.list_parcels(cluster_name))
+    except Exception as exc:
+        return _dump({"error": str(exc)})
 
 
 @mcp.tool()
@@ -700,11 +1024,16 @@ async def get_yarn_app(cluster_name: str, app_id: str) -> str:
                 )
             }
         )
-    client = YarnClient(endpoints.yarn_rm_url)
+    if endpoints.disable_on_spnego and "yarn" in endpoints.spnego_required:
+        return _spnego_error("YARN")
+    client = YarnClient(endpoints.yarn_rm_url, timeout=endpoints.downstream_timeout_seconds)
     try:
         return _dump(await client.get_app(app_id))
     except YarnNotFoundError as exc:
         return _dump({"error": str(exc)})
+    except SpnegoRequiredError:
+        _pool.mark_spnego_required(cluster_name, "yarn")
+        return _spnego_error("YARN")
     except Exception as exc:
         return _dump({"error": f"YARN error: {exc}"})
 
@@ -736,11 +1065,16 @@ async def list_yarn_apps(
                 )
             }
         )
-    client = YarnClient(endpoints.yarn_rm_url)
+    if endpoints.disable_on_spnego and "yarn" in endpoints.spnego_required:
+        return _spnego_error("YARN")
+    client = YarnClient(endpoints.yarn_rm_url, timeout=endpoints.downstream_timeout_seconds)
     try:
         return _dump(
             await client.list_apps(state=state, queue=queue, user=user, limit=limit)
         )
+    except SpnegoRequiredError:
+        _pool.mark_spnego_required(cluster_name, "yarn")
+        return _spnego_error("YARN")
     except Exception as exc:
         return _dump({"error": f"YARN error: {exc}"})
 
@@ -767,9 +1101,14 @@ async def get_yarn_queue(
                 )
             }
         )
-    client = YarnClient(endpoints.yarn_rm_url)
+    if endpoints.disable_on_spnego and "yarn" in endpoints.spnego_required:
+        return _spnego_error("YARN")
+    client = YarnClient(endpoints.yarn_rm_url, timeout=endpoints.downstream_timeout_seconds)
     try:
         return _dump(await client.get_queue(queue_name=queue_name))
+    except SpnegoRequiredError:
+        _pool.mark_spnego_required(cluster_name, "yarn")
+        return _spnego_error("YARN")
     except Exception as exc:
         return _dump({"error": f"YARN error: {exc}"})
 
@@ -796,11 +1135,16 @@ async def get_spark_app(cluster_name: str, app_id: str) -> str:
                 )
             }
         )
-    client = SparkClient(endpoints.spark_hs_url)
+    if endpoints.disable_on_spnego and "spark" in endpoints.spnego_required:
+        return _spnego_error("Spark History Server")
+    client = SparkClient(endpoints.spark_hs_url, timeout=endpoints.downstream_timeout_seconds)
     try:
         return _dump(await client.get_app(app_id))
     except SparkNotFoundError as exc:
         return _dump({"error": str(exc)})
+    except SpnegoRequiredError:
+        _pool.mark_spnego_required(cluster_name, "spark")
+        return _spnego_error("Spark History Server")
     except Exception as exc:
         return _dump({"error": f"Spark error: {exc}"})
 
@@ -829,9 +1173,14 @@ async def get_spark_stages(
                 )
             }
         )
-    client = SparkClient(endpoints.spark_hs_url)
+    if endpoints.disable_on_spnego and "spark" in endpoints.spnego_required:
+        return _spnego_error("Spark History Server")
+    client = SparkClient(endpoints.spark_hs_url, timeout=endpoints.downstream_timeout_seconds)
     try:
         return _dump(await client.get_stages(app_id, status=status))
+    except SpnegoRequiredError:
+        _pool.mark_spnego_required(cluster_name, "spark")
+        return _spnego_error("Spark History Server")
     except Exception as exc:
         return _dump({"error": f"Spark error: {exc}"})
 
@@ -859,9 +1208,14 @@ async def list_spark_apps(
                 )
             }
         )
-    client = SparkClient(endpoints.spark_hs_url)
+    if endpoints.disable_on_spnego and "spark" in endpoints.spnego_required:
+        return _spnego_error("Spark History Server")
+    client = SparkClient(endpoints.spark_hs_url, timeout=endpoints.downstream_timeout_seconds)
     try:
         return _dump(await client.list_apps(status=status, limit=limit))
+    except SpnegoRequiredError:
+        _pool.mark_spnego_required(cluster_name, "spark")
+        return _spnego_error("Spark History Server")
     except Exception as exc:
         return _dump({"error": f"Spark error: {exc}"})
 
@@ -888,9 +1242,14 @@ async def get_namenode_status(cluster_name: str) -> str:
                 )
             }
         )
-    client = HdfsClient(endpoints.hdfs_nn_url)
+    if endpoints.disable_on_spnego and "hdfs" in endpoints.spnego_required:
+        return _spnego_error("HDFS NameNode")
+    client = HdfsClient(endpoints.hdfs_nn_url, timeout=endpoints.downstream_timeout_seconds)
     try:
         return _dump(await client.get_namenode_status())
+    except SpnegoRequiredError:
+        _pool.mark_spnego_required(cluster_name, "hdfs")
+        return _spnego_error("HDFS NameNode")
     except Exception as exc:
         return _dump({"error": f"HDFS error: {exc}"})
 
@@ -918,11 +1277,16 @@ async def get_oozie_job(cluster_name: str, job_id: str) -> str:
                 )
             }
         )
-    client = OozieClient(endpoints.oozie_url)
+    if endpoints.disable_on_spnego and "oozie" in endpoints.spnego_required:
+        return _spnego_error("Oozie")
+    client = OozieClient(endpoints.oozie_url, timeout=endpoints.downstream_timeout_seconds)
     try:
         return _dump(await client.get_job(job_id))
     except OozieNotFoundError as exc:
         return _dump({"error": str(exc)})
+    except SpnegoRequiredError:
+        _pool.mark_spnego_required(cluster_name, "oozie")
+        return _spnego_error("Oozie")
     except Exception as exc:
         return _dump({"error": f"Oozie error: {exc}"})
 
@@ -954,13 +1318,18 @@ async def list_oozie_jobs(
                 )
             }
         )
-    client = OozieClient(endpoints.oozie_url)
+    if endpoints.disable_on_spnego and "oozie" in endpoints.spnego_required:
+        return _spnego_error("Oozie")
+    client = OozieClient(endpoints.oozie_url, timeout=endpoints.downstream_timeout_seconds)
     try:
         return _dump(
             await client.list_jobs(
                 status=status, jobtype=jobtype, user=user, limit=limit
             )
         )
+    except SpnegoRequiredError:
+        _pool.mark_spnego_required(cluster_name, "oozie")
+        return _spnego_error("Oozie")
     except Exception as exc:
         return _dump({"error": f"Oozie error: {exc}"})
 

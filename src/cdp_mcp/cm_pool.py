@@ -4,7 +4,7 @@ cm_pool.py — Multi-CM connection pool with auto-discovery of service endpoints
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import structlog
 
@@ -23,6 +23,9 @@ class ServiceEndpoints:
     spark_hs_url: str | None = None
     hdfs_nn_url: str | None = None
     oozie_url: str | None = None
+    downstream_timeout_seconds: int = 30
+    disable_on_spnego: bool = True
+    spnego_required: set[str] = field(default_factory=set)
 
 
 # ── CMPool ────────────────────────────────────────────────────────────────────
@@ -116,7 +119,10 @@ class CMPool:
         If any unexpected error occurs, log a warning and continue.
         """
         key = cluster_name.lower()
-        eps = ServiceEndpoints()
+        eps = ServiceEndpoints(
+            downstream_timeout_seconds=client.cfg.downstream_timeout_seconds,
+            disable_on_spnego=client.cfg.disable_on_spnego,
+        )
 
         # Check for endpoints_override first
         override = client.cfg.endpoints_override or {}
@@ -195,13 +201,21 @@ class CMPool:
                 if role.get("type") == "RESOURCEMANAGER":
                     hostname = role.get("hostRef", {}).get("hostname", "")
                     if hostname:
-                        # Try to get the configured port; fall back to 8088
-                        port = await self._get_role_port(
-                            cluster_name, client, service_name,
-                            role.get("name", ""), "yarn.resourcemanager.webapp.address",
-                            default_port=8088,
+                        role_name = role.get("name", "")
+                        https_port = await self._get_role_config_value(
+                            cluster_name, client, service_name, role_name,
+                            "resourcemanager_webserver_https_port",
                         )
-                        eps.yarn_rm_url = f"http://{hostname}:{port}"
+                        if https_port:
+                            eps.yarn_rm_url = f"https://{hostname}:{https_port}"
+                        else:
+                            # Try to get the configured port; fall back to 8088
+                            port = await self._get_role_port(
+                                cluster_name, client, service_name,
+                                role_name, "yarn.resourcemanager.webapp.address",
+                                default_port=8088,
+                            )
+                            eps.yarn_rm_url = f"http://{hostname}:{port}"
                         log.debug(
                             "cm_pool.yarn_rm_discovered",
                             cluster=cluster_name,
@@ -234,13 +248,21 @@ class CMPool:
                 if role.get("type") == "SPARK_YARN_HISTORY_SERVER":
                     hostname = role.get("hostRef", {}).get("hostname", "")
                     if hostname:
-                        port = await self._get_role_port(
-                            cluster_name, client, service_name,
-                            role.get("name", ""),
-                            "history.port",
-                            default_port=18088,
+                        role_name = role.get("name", "")
+                        https_port = await self._get_role_config_value(
+                            cluster_name, client, service_name, role_name,
+                            "ssl_server_port",
                         )
-                        eps.spark_hs_url = f"http://{hostname}:{port}"
+                        if https_port:
+                            eps.spark_hs_url = f"https://{hostname}:{https_port}"
+                        else:
+                            port = await self._get_role_port(
+                                cluster_name, client, service_name,
+                                role_name,
+                                "history.port",
+                                default_port=18088,
+                            )
+                            eps.spark_hs_url = f"http://{hostname}:{port}"
                         log.debug(
                             "cm_pool.spark_hs_discovered",
                             cluster=cluster_name,
@@ -276,13 +298,21 @@ class CMPool:
                         continue
                     hostname = role.get("hostRef", {}).get("hostname", "")
                     if hostname:
-                        port = await self._get_role_port(
-                            cluster_name, client, service_name,
-                            role.get("name", ""),
-                            "dfs.namenode.http-address",
-                            default_port=9870,
+                        role_name = role.get("name", "")
+                        https_port = await self._get_role_config_value(
+                            cluster_name, client, service_name, role_name,
+                            "dfs_https_port",
                         )
-                        eps.hdfs_nn_url = f"http://{hostname}:{port}"
+                        if https_port:
+                            eps.hdfs_nn_url = f"https://{hostname}:{https_port}"
+                        else:
+                            port = await self._get_role_port(
+                                cluster_name, client, service_name,
+                                role_name,
+                                "dfs.namenode.http-address",
+                                default_port=9870,
+                            )
+                            eps.hdfs_nn_url = f"http://{hostname}:{port}"
                         log.debug(
                             "cm_pool.hdfs_nn_discovered",
                             cluster=cluster_name,
@@ -315,13 +345,21 @@ class CMPool:
                 if role.get("type") == "OOZIE_SERVER":
                     hostname = role.get("hostRef", {}).get("hostname", "")
                     if hostname:
-                        port = await self._get_role_port(
-                            cluster_name, client, service_name,
-                            role.get("name", ""),
-                            "oozie_http_port",
-                            default_port=11000,
+                        role_name = role.get("name", "")
+                        https_port = await self._get_role_config_value(
+                            cluster_name, client, service_name, role_name,
+                            "oozie_https_port",
                         )
-                        eps.oozie_url = f"http://{hostname}:{port}"
+                        if https_port:
+                            eps.oozie_url = f"https://{hostname}:{https_port}"
+                        else:
+                            port = await self._get_role_port(
+                                cluster_name, client, service_name,
+                                role_name,
+                                "oozie_http_port",
+                                default_port=11000,
+                            )
+                            eps.oozie_url = f"http://{hostname}:{port}"
                         log.debug(
                             "cm_pool.oozie_discovered",
                             cluster=cluster_name,
@@ -365,6 +403,36 @@ class CMPool:
             pass
         return default_port
 
+    async def _get_role_config_value(
+        self,
+        cluster_name: str,
+        client: ClouderaManagerClient,
+        service_name: str,
+        role_name: str,
+        config_key: str,
+    ) -> str | None:
+        """
+        Return a role config value if present, else None -- distinct from
+        _get_role_port's default-port fallback, so callers can tell "key not
+        configured" apart from "key configured with this value".
+        """
+        if not role_name:
+            return None
+        try:
+            data = await client._get(
+                f"/clusters/{cluster_name}/services/{service_name}"
+                f"/roles/{role_name}/config",
+                params={"view": "full"},
+            )
+            for item in data.get("items", []):
+                if item.get("name") == config_key:
+                    raw_val = item.get("value") or item.get("default")
+                    if raw_val not in (None, ""):
+                        return str(raw_val)
+        except Exception:
+            pass
+        return None
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def get_client_for_cluster(self, cluster_name: str) -> ClouderaManagerClient | None:
@@ -374,6 +442,13 @@ class CMPool:
     def get_endpoints(self, cluster_name: str) -> ServiceEndpoints:
         """Return discovered service endpoints for cluster_name."""
         return self._endpoints.get(cluster_name.lower(), ServiceEndpoints())
+
+    def mark_spnego_required(self, cluster_name: str, service: str) -> None:
+        """Record that a downstream service requires SPNEGO, so future calls
+        can short-circuit instead of repeating a doomed request."""
+        key = cluster_name.lower()
+        if key in self._endpoints:
+            self._endpoints[key].spnego_required.add(service)
 
     def list_environments(self) -> list[str]:
         return list(self._clients.keys())

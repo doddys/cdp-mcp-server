@@ -6,14 +6,26 @@
 |---|---|
 | `list_clusters` | List all managed clusters (name, version, health) |
 | `list_services` | List services on a cluster |
+| `get_service` | Single-service detail: healthSummary, healthChecks, serviceState, config staleness |
+| `list_roles` | Lightweight role status listing for a service (healthSummary, roleState, commissionState) |
+| `get_role_status` | Detailed status for a single role instance |
 | `get_service_logs` | Extract service logs with time range filtering |
 | `get_alerts` | Get cluster alerts and events |
 | `get_service_metrics` | Time-series metrics via tsquery |
+| `get_host_metrics` | Time-series metrics for a single host (CPU, memory, disk, network) |
+| `list_available_metrics` | Discover metric names/descriptions for use with `get_service_metrics`/`get_host_metrics` |
 | `get_config` | Read service configuration |
 | `update_config` | Write service configuration |
+| `list_impala_queries` | List Impala queries via CM's own query monitoring (no SPNEGO required) |
 | `run_service_command` | Execute async CM command (restart, start, stop, deploy config, etc.) |
 | `get_command_status` | Poll async command status |
+| `list_cluster_commands` | List recent commands executed against a cluster with success/failure status |
 | `get_host_status` | Host health, roles, rack info |
+| `get_cluster_security_info` | TLS and Kerberos status for a cluster — check before calling YARN/Spark/HDFS/Oozie tools |
+| `get_cluster_utilization` | Aggregated CPU/memory utilization report (capacity planning) |
+| `list_replication_schedules` | Replication schedules for a service with last-run status |
+| `get_replication_history` | Run history for a replication schedule |
+| `list_parcels` | Parcel (CDH/runtime distribution) version and activation status per host |
 | `get_audit_events` | CM audit log (login, config changes, command executions) |
 | `list_datahubs` | Enumerate DataHub clusters |
 | `refresh_cluster_map` | Rebuild cluster→CM mapping after failover or new cluster |
@@ -88,6 +100,14 @@
 1. `get_yarn_queue` → check `used_capacity` vs `capacity`
 2. `list_yarn_apps` with `state=RUNNING` → who is consuming resources
 3. `get_service_metrics` → trend over time
+
+### YARN/Spark/HDFS/Oozie tool returns a non-JSON / parse error?
+
+1. `get_cluster_security_info` → check `kerberos.kerberized`
+2. If `true`, the cluster requires SPNEGO for these service UIs, which is not
+   yet implemented (see `CLAUDE.md` roadmap) — use `list_impala_queries` /
+   `get_service_metrics` / `get_service_logs` (all CM-API-based, no SPNEGO
+   needed) for equivalent visibility where possible.
 
 ### CM internal health?
 

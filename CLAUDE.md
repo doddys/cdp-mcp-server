@@ -188,5 +188,24 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_clust
 ## Kerberos (out of scope MVP)
 Per cluster CDP con Kerberos/SPNEGO usare `httpx-gssapi`. Da implementare come opzione `CM_KERBEROS=true`.
 
+### TODO — SPNEGO per i client downstream (YARN/HDFS/Spark/Oozie)
+`cm_client.py` usa Basic auth verso CM e funziona. I client in `clients/` (YARN RM,
+Spark HS, HDFS NameNode JMX, Oozie) non ricevono alcuna credenziale: su cluster
+Kerberizzati le richieste non autenticate tornano una risposta non-JSON (pagina
+HTML di negoziazione o corpo vuoto), che oggi si manifesta come errore di parsing
+JSON generico.
+
+- Libreria: `httpx-gssapi` (implementa `httpx.Auth`), da agganciare solo ai
+  quattro client downstream — non a `cm_client.py`.
+- Credenziali da keytab, non da `kinit` interattivo (processo server long-running):
+  `KRB5_CLIENT_KTNAME=/path/to/svc.keytab` + principal dedicato, così gssapi
+  rinnova automaticamente il ticket.
+- Trade-off principale: dipendenza da libreria di sistema (MIT `libkrb5-dev` a
+  build time, `krb5-libs` a runtime) → immagine Docker più pesante.
+- Punto di innesto: `cm_pool.py` (dove vengono istanziati `YarnClient`,
+  `SparkClient`, `HdfsClient`, `OozieClient`) + nuovo flag `CM_KERBEROS=true` in
+  `config.py`.
+- Non implementare senza discussione esplicita (vedi regola architetturale #4).
+
 ## Nota linguaggio futuro
 Il PoC è Python + FastMCP. Se validato, valutare riscrittura in Go per distribuzione come binario statico.
