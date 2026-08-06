@@ -23,8 +23,9 @@
 | `get_host_status` | Host health, roles, rack info |
 | `get_cluster_security_info` | TLS and Kerberos status for a cluster — check before calling YARN/Spark/HDFS/Oozie tools |
 | `get_cluster_utilization` | Aggregated CPU/memory utilization report (capacity planning) — auto-chunks ranges over 29 days |
-| `list_replication_schedules` | Replication schedules for a service with last-run status — `service_name` required; embeds recent `history` inline |
-| `get_replication_history` | Run history for a replication schedule |
+| `list_replication_schedules` | Replication schedules for a service — `service_name` required; **lightweight discovery** (capped to `maxCommands=1` + `view=summary`) so it stays under the tool-result cap; returns `{items, count, truncated, applied_limits}` |
+| `get_replication_history` | Paginated run history for one schedule over a time window — CM has no server-side time filter, so the window is applied client-side while paging by offset; `view=summary` carries the per-run counters at ~10–40× smaller than `full` |
+| `get_replication_metrics` | **Aggregated** replication metrics over a time window (the monthly-report tool) — discovers schedules and accumulates per-run counters (bytes/files copied, files failed, tables processed, errors, avg duration) into per-schedule totals + a capped failed-run list; stays well under the cap even for an hourly schedule over a month |
 | `list_parcels` | Parcel (CDH/runtime distribution) version and activation status per host |
 | `get_audit_events` | CM audit log (login, config changes, command executions) — paginates internally, see note below |
 | `list_datahubs` | Enumerate DataHub clusters |
@@ -40,8 +41,9 @@
 
 !!! note "Time-range response metadata"
     `get_alerts`, `get_audit_events`, `get_service_metrics`, `get_host_metrics`,
-    `get_cluster_utilization`, and `list_impala_queries` all return an object (not a
-    bare list) with metadata alongside `items`:
+    `get_cluster_utilization`, `list_impala_queries`, `get_replication_history`,
+    and `get_replication_metrics` all return an object (not a bare list) with
+    metadata alongside `items`:
 
     - `time_range_defaulted` — `true` if `start_time`/`end_time` were omitted; they
       silently default to the last hour, so check `effective_range` before assuming a
@@ -55,6 +57,12 @@
     - `chunked`/`num_chunks` (`get_cluster_utilization` only) — CM rejects any single
       request spanning more than 30 days; ranges over 29 days are split into multiple
       calls and merged automatically. This field just tells you it happened.
+    - `truncated` (replication) — on `get_replication_history`, `true` means `max_scan`
+      was hit before the window was fully scanned; on `get_replication_metrics`,
+      per-schedule `truncated` means `max_runs_per_schedule` was hit mid-window, and
+      top-level `schedule_truncated` means `max_schedules` was hit (more schedules
+      exist). Raise the cap or narrow the range. `get_replication_history` also
+      returns `total_in_range` (true match count, independent of `limit`).
 
 ## Registry Tools
 
@@ -126,6 +134,19 @@
    yet implemented (see `CLAUDE.md` roadmap) — use `list_impala_queries` /
    `get_service_metrics` / `get_service_logs` (all CM-API-based, no SPNEGO
    needed) for equivalent visibility where possible.
+
+### Replication — monthly report / which jobs failed this month?
+
+1. `get_replication_metrics` with `start_time` ~30 days ago (no `schedule_id`)
+   → per-schedule totals: `runs`, `succeeded`/`failed`, `total_bytes_copied`,
+   `total_files_failed`, `total_errors`, `avg_duration_seconds`, plus the
+   `failures[]` list. This is the right call for a monthly report — it stays
+   well under the tool-result cap even for an hourly schedule over a month.
+2. For any schedule with `failed > 0`, drill in with `get_replication_history`
+   (`schedule_id`, `view=full`) to read the full `resultMessage`, `failedFiles`,
+   or Hive `errors[]`/`tables[]` for the failing runs.
+3. `list_replication_schedules` only if you need schedule metadata (cron,
+   paused, nextRun) — it is a lightweight discovery call, not for history.
 
 ### CM internal health?
 

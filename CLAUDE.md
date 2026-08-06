@@ -115,6 +115,29 @@ If an endpoint is not discovered → return a structured JSON message, never a t
 
 Default: `iceberg` (dvergari backward compatibility). For development use `file` or `env`.
 
+### 7. Bound large tool responses
+A tool that returns an unbounded CM payload can exceed the MCP ~1 MB
+tool-result cap and return nothing usable (confirmed live: HDFS/Hive
+replication schedules with unbounded embedded history). Every tool whose
+response can grow large must bound itself, in this order of preference:
+
+1. **Server-side caps first.** Prefer documented CM params (`maxSchedules`,
+   `maxCommands`, `maxResults`/`resultOffset`, `view=summary`, `limit`) over
+   fetching everything and trimming in Python — less bandwidth, correct
+   semantics. `view=summary` often carries the scalar counters at ~10–40×
+   smaller than `full`; use `full` only for per-record detail.
+2. **Client-side pagination where the server has no time filter.** When CM
+   has no `from`/`to` (e.g. `/replications/{id}/history`), page by offset with
+   a client-side cutoff on each record's timestamp (history is newest-first).
+3. **Aggregation for wide windows.** For a report spanning a wide time range
+   (e.g. one month), aggregate counters page-by-page and return totals, never
+   accumulate raw records — `get_replication_metrics` is the model.
+
+Return a structured envelope (`{items, count, truncated, ...,
+effective_range}`) consistent with `get_alerts`/`get_audit_events`/
+`get_service_logs`/`get_replication_*`, so the caller can tell "nothing
+matched" from "we stopped looking". Never return a bare unbounded list.
+
 ---
 
 ## Useful commands

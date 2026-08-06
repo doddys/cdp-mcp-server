@@ -113,7 +113,7 @@ error, what now?") are in [docs/tools.md](docs/tools.md). Summary below.
 - `get_host_status` — Host health and role inventory
 - `get_cluster_security_info` — TLS/Kerberos status for a cluster
 - `get_cluster_utilization` — Aggregated CPU/memory utilization report
-- `list_replication_schedules` / `get_replication_history` — Replication job status and run history
+- `list_replication_schedules` / `get_replication_history` / `get_replication_metrics` — Replication discovery, paginated run history, and aggregated monthly metrics (bounded to stay under the tool-result cap; see [docs/tools.md](docs/tools.md))
 - `list_parcels` — Parcel (CDH/runtime distribution) version and activation status
 - `get_audit_events` — CM audit log
 - `list_datahubs` — Enumerate DataHub clusters
