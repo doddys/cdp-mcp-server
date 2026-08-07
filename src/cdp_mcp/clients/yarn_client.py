@@ -3,6 +3,8 @@ yarn_client.py — Async client for YARN ResourceManager REST API.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import structlog
 from tenacity import (
@@ -44,10 +46,18 @@ class YarnClient:
         timeout: int = 30,
         username: str | None = None,
         password: str | None = None,
+        auth: Any = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
-        self._auth = (username, password) if username and password else None
+        # `auth` (an httpx Auth, e.g. SPNEGO) takes precedence over basic
+        # username/password when both are supplied.
+        if auth is not None:
+            self._auth = auth
+        elif username and password:
+            self._auth = (username, password)
+        else:
+            self._auth = None
 
     def _retry_dec(self):
         return retry(

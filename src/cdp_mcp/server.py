@@ -5,6 +5,7 @@ server.py — FastMCP server entry point for cdp-mcp.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from contextlib import asynccontextmanager
 from typing import Any
@@ -13,10 +14,9 @@ import structlog
 from mcp.server.fastmcp import FastMCP
 
 from cdp_mcp.clients.errors import SpnegoRequiredError
-from cdp_mcp.clients.hdfs_client import HdfsClient
-from cdp_mcp.clients.oozie_client import OozieClient, OozieNotFoundError
-from cdp_mcp.clients.spark_client import SparkClient, SparkNotFoundError
-from cdp_mcp.clients.yarn_client import YarnClient, YarnNotFoundError
+from cdp_mcp.clients.oozie_client import OozieNotFoundError
+from cdp_mcp.clients.spark_client import SparkNotFoundError
+from cdp_mcp.clients.yarn_client import YarnNotFoundError
 from cdp_mcp.cm_pool import CMPool
 from cdp_mcp.config import ServerSettings, build_registry
 
@@ -43,7 +43,49 @@ async def _lifespan(server):
     _registry.stop()
 
 
-mcp = FastMCP("cdp-mcp", lifespan=_lifespan)
+# ── Transport selection ──────────────────────────────────────────────────────
+# FastMCP (mcp 1.x) defaults to the stdio transport: it reads JSON-RPC from stdin
+# and writes to stdout, so it is meant to be spawned by an MCP client (Claude
+# Desktop / CLI) as a child process. Under a standalone systemd service stdin is
+# /dev/null → the server reads EOF and exits cleanly (exit 0) immediately after
+# startup. To run cdp-mcp as a long-lived network daemon instead, set
+# MCP_TRANSPORT=streamable-http (or sse) plus MCP_HOST/MCP_PORT. host/port are
+# bound at FastMCP construction (run() reads them from self.settings); the
+# transport is chosen at run() time. stdio stays the default so existing
+# Claude Desktop configs are unchanged.
+_VALID_TRANSPORTS = ("stdio", "sse", "streamable-http")
+
+
+def _resolve_transport_settings(
+    env: dict[str, str] | None = None,
+) -> tuple[str, str, int]:
+    """Read MCP_TRANSPORT / MCP_HOST / MCP_PORT from the environment.
+
+    Returns ``(transport, host, port)``. ``transport`` is one of
+    ``stdio`` / ``sse`` / ``streamable-http``. Defaults: stdio, 127.0.0.1, 8000.
+    """
+    e = env if env is not None else os.environ
+    transport = (e.get("MCP_TRANSPORT") or "stdio").strip().lower() or "stdio"
+    if transport not in _VALID_TRANSPORTS:
+        raise RuntimeError(
+            f"Unsupported MCP_TRANSPORT={transport!r}; expected one of "
+            f"{', '.join(_VALID_TRANSPORTS)}."
+        )
+    host = (e.get("MCP_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+    port_raw = e.get("MCP_PORT") or "8000"
+    try:
+        port = int(port_raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Invalid MCP_PORT={port_raw!r}; expected an integer."
+        ) from exc
+    return transport, host, port
+
+
+_transport, _host, _port = _resolve_transport_settings()
+# FastMCP reads host/port from self.settings (set at construction), so bind them
+# here from the environment; they are ignored under the stdio transport.
+mcp = FastMCP("cdp-mcp", lifespan=_lifespan, host=_host, port=_port)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -56,8 +98,13 @@ def _spnego_error(service: str) -> str:
     return _dump(
         {
             "error": (
-                f"SPNEGO required for {service}; skipping "
-                "(disable_on_spnego=true). See CLAUDE.md Kerberos TODO."
+                f"SPNEGO required for {service}; the endpoint is Kerberized. "
+                "To use SPNEGO, enable Kerberos for this CM instance "
+                "(kerberos: true / CM_KERBEROS=true) and obtain a TGT (kinit) "
+                "or load a keytab into the default credentials cache. The "
+                "optional httpx-gssapi package must be installed "
+                "(`uv pip install -e '.[kerberos]'`). Set disable_on_spnego=false "
+                "to retry each call instead of skipping after the first challenge."
             ),
             "spnego_required": True,
         }
@@ -1202,10 +1249,10 @@ async def get_yarn_app(cluster_name: str, app_id: str) -> str:
                 )
             }
         )
-    if endpoints.disable_on_spnego and "yarn" in endpoints.spnego_required:
+    if not endpoints.kerberos and endpoints.disable_on_spnego and "yarn" in endpoints.spnego_required:
         return _spnego_error("YARN")
-    client = YarnClient(endpoints.yarn_rm_url, timeout=endpoints.downstream_timeout_seconds)
     try:
+        client = _pool.get_yarn_client(cluster_name)
         return _dump(await client.get_app(app_id))
     except YarnNotFoundError as exc:
         return _dump({"error": str(exc)})
@@ -1243,10 +1290,10 @@ async def list_yarn_apps(
                 )
             }
         )
-    if endpoints.disable_on_spnego and "yarn" in endpoints.spnego_required:
+    if not endpoints.kerberos and endpoints.disable_on_spnego and "yarn" in endpoints.spnego_required:
         return _spnego_error("YARN")
-    client = YarnClient(endpoints.yarn_rm_url, timeout=endpoints.downstream_timeout_seconds)
     try:
+        client = _pool.get_yarn_client(cluster_name)
         return _dump(
             await client.list_apps(state=state, queue=queue, user=user, limit=limit)
         )
@@ -1279,10 +1326,10 @@ async def get_yarn_queue(
                 )
             }
         )
-    if endpoints.disable_on_spnego and "yarn" in endpoints.spnego_required:
+    if not endpoints.kerberos and endpoints.disable_on_spnego and "yarn" in endpoints.spnego_required:
         return _spnego_error("YARN")
-    client = YarnClient(endpoints.yarn_rm_url, timeout=endpoints.downstream_timeout_seconds)
     try:
+        client = _pool.get_yarn_client(cluster_name)
         return _dump(await client.get_queue(queue_name=queue_name))
     except SpnegoRequiredError:
         _pool.mark_spnego_required(cluster_name, "yarn")
@@ -1313,10 +1360,10 @@ async def get_spark_app(cluster_name: str, app_id: str) -> str:
                 )
             }
         )
-    if endpoints.disable_on_spnego and "spark" in endpoints.spnego_required:
+    if not endpoints.kerberos and endpoints.disable_on_spnego and "spark" in endpoints.spnego_required:
         return _spnego_error("Spark History Server")
-    client = SparkClient(endpoints.spark_hs_url, timeout=endpoints.downstream_timeout_seconds)
     try:
+        client = _pool.get_spark_client(cluster_name)
         return _dump(await client.get_app(app_id))
     except SparkNotFoundError as exc:
         return _dump({"error": str(exc)})
@@ -1351,10 +1398,10 @@ async def get_spark_stages(
                 )
             }
         )
-    if endpoints.disable_on_spnego and "spark" in endpoints.spnego_required:
+    if not endpoints.kerberos and endpoints.disable_on_spnego and "spark" in endpoints.spnego_required:
         return _spnego_error("Spark History Server")
-    client = SparkClient(endpoints.spark_hs_url, timeout=endpoints.downstream_timeout_seconds)
     try:
+        client = _pool.get_spark_client(cluster_name)
         return _dump(await client.get_stages(app_id, status=status))
     except SpnegoRequiredError:
         _pool.mark_spnego_required(cluster_name, "spark")
@@ -1386,10 +1433,10 @@ async def list_spark_apps(
                 )
             }
         )
-    if endpoints.disable_on_spnego and "spark" in endpoints.spnego_required:
+    if not endpoints.kerberos and endpoints.disable_on_spnego and "spark" in endpoints.spnego_required:
         return _spnego_error("Spark History Server")
-    client = SparkClient(endpoints.spark_hs_url, timeout=endpoints.downstream_timeout_seconds)
     try:
+        client = _pool.get_spark_client(cluster_name)
         return _dump(await client.list_apps(status=status, limit=limit))
     except SpnegoRequiredError:
         _pool.mark_spnego_required(cluster_name, "spark")
@@ -1420,10 +1467,10 @@ async def get_namenode_status(cluster_name: str) -> str:
                 )
             }
         )
-    if endpoints.disable_on_spnego and "hdfs" in endpoints.spnego_required:
+    if not endpoints.kerberos and endpoints.disable_on_spnego and "hdfs" in endpoints.spnego_required:
         return _spnego_error("HDFS NameNode")
-    client = HdfsClient(endpoints.hdfs_nn_url, timeout=endpoints.downstream_timeout_seconds)
     try:
+        client = _pool.get_hdfs_client(cluster_name)
         return _dump(await client.get_namenode_status())
     except SpnegoRequiredError:
         _pool.mark_spnego_required(cluster_name, "hdfs")
@@ -1455,10 +1502,10 @@ async def get_oozie_job(cluster_name: str, job_id: str) -> str:
                 )
             }
         )
-    if endpoints.disable_on_spnego and "oozie" in endpoints.spnego_required:
+    if not endpoints.kerberos and endpoints.disable_on_spnego and "oozie" in endpoints.spnego_required:
         return _spnego_error("Oozie")
-    client = OozieClient(endpoints.oozie_url, timeout=endpoints.downstream_timeout_seconds)
     try:
+        client = _pool.get_oozie_client(cluster_name)
         return _dump(await client.get_job(job_id))
     except OozieNotFoundError as exc:
         return _dump({"error": str(exc)})
@@ -1496,10 +1543,10 @@ async def list_oozie_jobs(
                 )
             }
         )
-    if endpoints.disable_on_spnego and "oozie" in endpoints.spnego_required:
+    if not endpoints.kerberos and endpoints.disable_on_spnego and "oozie" in endpoints.spnego_required:
         return _spnego_error("Oozie")
-    client = OozieClient(endpoints.oozie_url, timeout=endpoints.downstream_timeout_seconds)
     try:
+        client = _pool.get_oozie_client(cluster_name)
         return _dump(
             await client.list_jobs(
                 status=status, jobtype=jobtype, user=user, limit=limit
@@ -1526,7 +1573,16 @@ def run() -> None:
         ),
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
     )
-    mcp.run()
+    # stdio (default): spawned by an MCP client over stdin/stdout. streamable-http
+    # / sse: long-lived network daemon (e.g. under systemd); clients connect over
+    # HTTP. Host/port were bound at FastMCP construction from MCP_HOST/MCP_PORT.
+    log.info(
+        "cdp_mcp.transport",
+        transport=_transport,
+        host=_host,
+        port=_port,
+    )
+    mcp.run(transport=_transport)
 
 
 if __name__ == "__main__":

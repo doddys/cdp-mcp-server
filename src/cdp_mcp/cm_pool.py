@@ -25,6 +25,13 @@ class ServiceEndpoints:
     oozie_url: str | None = None
     downstream_timeout_seconds: int = 30
     disable_on_spnego: bool = True
+    # When True, the downstream clients attach SPNEGO auth (from the CM
+    # instance's kerberos flag) for Kerberized clusters. cm_client.py is
+    # unaffected (Basic auth). kerberos_keytab/kerberos_principal enable
+    # in-process keytab acquisition (no external kinit); see clients/spnego.py.
+    kerberos: bool = False
+    kerberos_keytab: str | None = None
+    kerberos_principal: str | None = None
     spnego_required: set[str] = field(default_factory=set)
 
 
@@ -122,6 +129,9 @@ class CMPool:
         eps = ServiceEndpoints(
             downstream_timeout_seconds=client.cfg.downstream_timeout_seconds,
             disable_on_spnego=client.cfg.disable_on_spnego,
+            kerberos=client.cfg.kerberos,
+            kerberos_keytab=client.cfg.kerberos_keytab,
+            kerberos_principal=client.cfg.kerberos_principal,
         )
 
         # Check for endpoints_override first
@@ -449,6 +459,69 @@ class CMPool:
         key = cluster_name.lower()
         if key in self._endpoints:
             self._endpoints[key].spnego_required.add(service)
+
+    # ── Downstream client factories ──────────────────────────────────────────
+    # Centralised construction point for the four downstream clients. When the
+    # CM instance has kerberos=True, each client is built with an HTTPSPNEGOAuth
+    # (from spnego.py). Credentials come from the default ccache, or — when
+    # kerberos_keytab/kerberos_principal are set — from in-process keytab
+    # acquisition. auth=None when kerberos=False. Returns None if the endpoint
+    # was not discovered. build_spnego_auth may raise SpnegoConfigError (typed)
+    # if the optional httpx-gssapi extra is missing or no TGT is available —
+    # server.py surfaces that via its generic exception handler.
+
+    def _spnego_auth(self, cluster_name: str):
+        from cdp_mcp.clients.spnego import build_spnego_auth
+        eps = self.get_endpoints(cluster_name)
+        return build_spnego_auth(
+            eps.kerberos,
+            keytab=eps.kerberos_keytab,
+            principal=eps.kerberos_principal,
+        )
+
+    def get_yarn_client(self, cluster_name: str):
+        from cdp_mcp.clients.yarn_client import YarnClient
+        eps = self.get_endpoints(cluster_name)
+        if not eps.yarn_rm_url:
+            return None
+        return YarnClient(
+            eps.yarn_rm_url,
+            timeout=eps.downstream_timeout_seconds,
+            auth=self._spnego_auth(cluster_name),
+        )
+
+    def get_spark_client(self, cluster_name: str):
+        from cdp_mcp.clients.spark_client import SparkClient
+        eps = self.get_endpoints(cluster_name)
+        if not eps.spark_hs_url:
+            return None
+        return SparkClient(
+            eps.spark_hs_url,
+            timeout=eps.downstream_timeout_seconds,
+            auth=self._spnego_auth(cluster_name),
+        )
+
+    def get_hdfs_client(self, cluster_name: str):
+        from cdp_mcp.clients.hdfs_client import HdfsClient
+        eps = self.get_endpoints(cluster_name)
+        if not eps.hdfs_nn_url:
+            return None
+        return HdfsClient(
+            eps.hdfs_nn_url,
+            timeout=eps.downstream_timeout_seconds,
+            auth=self._spnego_auth(cluster_name),
+        )
+
+    def get_oozie_client(self, cluster_name: str):
+        from cdp_mcp.clients.oozie_client import OozieClient
+        eps = self.get_endpoints(cluster_name)
+        if not eps.oozie_url:
+            return None
+        return OozieClient(
+            eps.oozie_url,
+            timeout=eps.downstream_timeout_seconds,
+            auth=self._spnego_auth(cluster_name),
+        )
 
     def list_environments(self) -> list[str]:
         return list(self._clients.keys())

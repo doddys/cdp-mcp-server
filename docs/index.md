@@ -14,11 +14,16 @@ Fork of [dvergari/cloudera-mcp-server](https://github.com/dvergari/cloudera-mcp-
 ## Quick Start
 
 ```bash
-git clone https://github.com/disoardi/cdp-mcp-server.git
+git clone https://github.com/doddys/cdp-mcp-server.git
 cd cdp-mcp-server
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -e .
-REGISTRY_BACKEND=env CM_HOST=your-cm CM_USERNAME=admin CM_PASSWORD=pass CM_USE_TLS=false CM_API_VERSION=v41 cdp-mcp
+uv venv --python 3.12
+uv sync --extra dev
+REGISTRY_BACKEND=env CM_HOST=your-cm CM_USERNAME=admin CM_PASSWORD=pass CM_USE_TLS=false CM_API_VERSION=v51 cdp-mcp
 ```
 
 See [Installation](installation.md) for detailed setup instructions.
+For a VPS deployment against a **non-Kerberized** cluster, see
+[VPS install (no Kerberos)](vps-install-no-kerberos.md).
+For an unattended VPS deployment with autossh + keytab-backed SPNEGO, see
+[VPS install (autossh/SPNEGO)](vps-install.md); the underlying SOCKS+kinit
+concepts are in [Kerberos tunneling](kerberos-tunneling.md).

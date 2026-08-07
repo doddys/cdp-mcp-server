@@ -8,12 +8,17 @@
 ## Install
 
 ```bash
-git clone https://github.com/disoardi/cdp-mcp-server.git
+git clone https://github.com/doddys/cdp-mcp-server.git
 cd cdp-mcp-server
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+uv venv --python 3.12
+uv sync --extra dev        # installs from uv.lock — pins a known-good mcp 1.x
 ```
+
+> Use `uv sync` rather than a lockless `uv pip install -e .` / `pip install -e .`:
+> those resolve fresh and can pull an incompatible major `mcp` (2.0 removed the
+> `mcp.server.fastmcp` import the server uses). `uv.lock` pins the working 1.x.
+> Plain `pip install -e ".[dev]"` is also safe now that `pyproject.toml` caps
+> `mcp<2`, and is what CI uses.
 
 ## Registry Backends
 

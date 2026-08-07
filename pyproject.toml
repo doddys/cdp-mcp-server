@@ -29,7 +29,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp>=1.0.0",
+    # Cap <2: the MCP Python SDK's 2.0 major release removed `mcp.server.fastmcp`
+    # (FastMCP moved to the standalone `fastmcp` package), which server.py imports.
+    # A lockless `uv pip install -e .` would otherwise resolve to 2.0 and break.
+    # Use `uv sync` to install from uv.lock, which pins the 1.x version.
+    "mcp>=1.0.0,<2",
     "httpx[socks]>=0.27.0",
     "tenacity>=8.3.0",
     "pydantic>=2.7.0",
@@ -54,6 +58,13 @@ dev = [
     "respx>=0.21.0",
     "ruff>=0.4.0",
     "mypy>=1.10.0",
+]
+# Kerberos/SPNEGO for the four downstream service clients on Kerberized
+# clusters. Optional: only needed when a CM instance has kerberos=true.
+# Requires MIT krb5 at build/runtime (macOS: brew install krb5, then build with
+# PKG_CONFIG_PATH=/opt/homebrew/opt/krb5/lib/pkgconfig).
+kerberos = [
+    "httpx-gssapi>=0.6.0",
 ]
 
 [project.scripts]

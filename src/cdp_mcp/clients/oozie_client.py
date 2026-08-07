@@ -3,6 +3,8 @@ oozie_client.py — Async client for Oozie REST API.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import structlog
 from tenacity import (
@@ -47,9 +49,10 @@ class OozieServiceUnavailable(OozieClientError):
 # ── Client ────────────────────────────────────────────────────────────────────
 
 class OozieClient:
-    def __init__(self, base_url: str, timeout: int = 30) -> None:
+    def __init__(self, base_url: str, timeout: int = 30, auth: Any = None) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._auth = auth
 
     def _retry_dec(self):
         return retry(
@@ -66,6 +69,7 @@ class OozieClient:
         async def _execute() -> dict:
             async with httpx.AsyncClient(
                 base_url=self._base_url,
+                auth=self._auth,
                 timeout=self._timeout,
                 verify=False,
                 follow_redirects=True,

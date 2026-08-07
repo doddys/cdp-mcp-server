@@ -38,6 +38,13 @@ cm_instances.yaml
 !cm_instances.yaml.example
 tests/integration/cm_instances.yaml
 test_results.md
+# Local Claude Desktop config (contains real credentials + absolute paths)
+cdp-mcp-server-claude.json
+# Local scratch / run snippets
+RUN
+
+# Local operational prompt templates (contain real cluster names)
+.claude/prompts/cluster-health-report.md
 
 # IDE
 .vscode/settings.json

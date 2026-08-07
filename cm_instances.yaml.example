@@ -29,6 +29,20 @@ instances:
     downstream_timeout_seconds: 30  # HTTP timeout for YARN/Spark/HDFS/Oozie calls
     disable_on_spnego: true         # Skip a downstream tool after it hits a SPNEGO
                                      # challenge, instead of retrying every call
+    kerberos: false                 # true → attach SPNEGO auth to the downstream
+                                     # service clients (NameNode/YARN/Spark/Oozie)
+                                     # using the default Kerberos credentials cache
+                                     # (kinit TGT, or a keytab loaded into the
+                                     # ccache). CM itself always uses Basic auth.
+                                     # Outbound proxy: set ALL_PROXY env var
+                                     # (e.g. socks5h://host:port) — httpx honours it.
+    # In-process keytab acquisition (unattended production): when
+    # kerberos_keytab is set, SPNEGO acquires a TGT directly from the keytab
+    # via gssapi (no external `kinit` / renewal cron needed). Requires
+    # kerberos: true and kerberos_principal. Leave both unset to use the
+    # default credentials cache instead.
+    # kerberos_keytab: /etc/cdp-mcp/mcp.keytab
+    # kerberos_principal: mcp-svc@REALM
     active: true                    # Set to false to disable without removing
 
   # ── Production CM with TLS ────────────────────────────────────────────────

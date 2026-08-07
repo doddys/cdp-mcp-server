@@ -49,6 +49,29 @@ def test_get_all_after_start(monkeypatch):
     assert all_inst[0].host == "cm.test"
 
 
+def test_load_keytab_config_from_env(monkeypatch):
+    """CM_KERBEROS_KEYTAB / CM_KERBEROS_PRINCIPAL flow into ClouderaManagerSettings."""
+    monkeypatch.setenv("CM_HOST", "cm.test")
+    monkeypatch.setenv("CM_KERBEROS", "true")
+    monkeypatch.setenv("CM_KERBEROS_KEYTAB", "/etc/cdp-mcp/mcp.keytab")
+    monkeypatch.setenv("CM_KERBEROS_PRINCIPAL", "mcp-svc@REALM")
+    reg = EnvRegistry()
+    inst = reg.load()[0]
+    assert inst.kerberos is True
+    assert inst.kerberos_keytab == "/etc/cdp-mcp/mcp.keytab"
+    assert inst.kerberos_principal == "mcp-svc@REALM"
+
+
+def test_load_keytab_unset_defaults_to_none(monkeypatch):
+    monkeypatch.setenv("CM_HOST", "cm.test")
+    monkeypatch.delenv("CM_KERBEROS_KEYTAB", raising=False)
+    monkeypatch.delenv("CM_KERBEROS_PRINCIPAL", raising=False)
+    reg = EnvRegistry()
+    inst = reg.load()[0]
+    assert inst.kerberos_keytab is None
+    assert inst.kerberos_principal is None
+
+
 def test_defaults_applied(monkeypatch):
     monkeypatch.setenv("CM_HOST", "cm.test")
     monkeypatch.delenv("CM_PORT", raising=False)

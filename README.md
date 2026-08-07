@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server for Cloudera Manager / CDP cluster administr
 
 Based on [Davide Isoardi's cdp-mcp-server](https://github.com/disoardi/cdp-mcp-server), itself a fork of [dvergari/cloudera-mcp-server](https://github.com/dvergari/cloudera-mcp-server) — Apache 2.0. Doddy Sebastianus is extending the functionality.
 
-The codebase builds on the original fork with pluggable registry backends (File, Env, Iceberg), additional service clients (YARN, Spark History Server, HDFS NameNode, Oozie), role/metric/security/replication/Impala monitoring tools, SOCKS5 proxy support, and clean SPNEGO detection with per-cluster short-circuiting.
+The codebase builds on the original fork with pluggable registry backends (File, Env, Iceberg), additional service clients (YARN, Spark History Server, HDFS NameNode, Oozie), role/metric/security/replication/Impala monitoring tools, SOCKS5 proxy support, optional Kerberos/SPNEGO auth for the downstream service UIs, and clean SPNEGO detection with per-cluster short-circuiting.
 
 ## Quick Start (general purpose — no Iceberg required)
 
@@ -38,8 +38,9 @@ REGISTRY_BACKEND=env \
 
 Additional env vars (all optional): `CM_ENVIRONMENT`, `CM_VERIFY_SSL`, `CM_API_VERSION`,
 `CM_TIMEOUT_SECONDS` (CM core API calls, default 30), `CM_DOWNSTREAM_TIMEOUT_SECONDS`
-(YARN/Spark/HDFS/Oozie calls, default 30), `CM_DISABLE_ON_SPNEGO` (default `true` —
-see [Kerberos / SPNEGO](#kerberos--spnego) below). The `file` backend exposes the same
+(YARN/Spark/HDFS/Oozie calls, default 30), `CM_DISABLE_ON_SPNEGO` (default `true`),
+`CM_KERBEROS` (default `false` — enable SPNEGO for the downstream clients; see
+[Kerberos / SPNEGO](#kerberos--spnego) below). The `file` backend exposes the same
 fields per-instance in `cm_instances.yaml` (see `cm_instances.yaml.example`).
 
 ### Connecting through a SOCKS5 proxy / SSH tunnel
@@ -55,6 +56,10 @@ ALL_PROXY=socks5h://127.0.0.1:7890 REGISTRY_BACKEND=file cdp-mcp
 `socks5h://` resolves DNS through the proxy, which is usually what you want for
 internal-only hostnames. This requires the `httpx[socks]` extra (already a declared
 dependency — `uv sync --extra dev` pulls in `socksio` automatically).
+
+For the full jump-host + Kerberos setup (SSH dynamic port forward, `kinit`/keytab,
+TGT renewal, end-to-end recipe), see
+[docs/kerberos-tunneling.md](docs/kerberos-tunneling.md).
 
 ## Claude Desktop Configuration
 
@@ -166,21 +171,62 @@ to over HTTPS automatically when the role's config reports a TLS port (see
 
 ## Kerberos / SPNEGO
 
-Full Kerberos/SPNEGO auth for the YARN/Spark/HDFS/Oozie service UIs is **not yet
-implemented** (tracked in `CLAUDE.md`). On a Kerberized cluster, calling one of those
-tools will hit a `401 Negotiate` challenge; cdp-mcp detects this cleanly and returns a
-structured `spnego_required` error instead of a cryptic parse failure.
+On Kerberized clusters the YARN/Spark/HDFS/Oozie service UIs challenge with
+SPNEGO. cdp-mcp can attach SPNEGO auth to those four downstream clients so the tools
+work against Kerberized clusters. It is **opt-in** and uses the **default Kerberos
+credentials cache** (a `kinit` TGT, or a keytab you've loaded into the ccache).
 
-By default (`disable_on_spnego: true` / `CM_DISABLE_ON_SPNEGO=true`), once a
-service is found to require SPNEGO on a given cluster, cdp-mcp remembers this and
-short-circuits further calls to that tool immediately — no repeated network
-round-trips or timeouts. Set it to `false` to always attempt the call fresh (useful
-while testing a Kerberos setup).
+> CM itself always uses Basic auth — `kerberos` affects only the four downstream
+> service clients, never the CM API client.
 
-Run `get_cluster_security_info` first on an unfamiliar cluster to check its TLS/Kerberos
-status upfront. CM-API-based tools (`list_impala_queries`, `get_service_metrics`,
-`get_service_logs`, etc.) work regardless, since they authenticate against CM itself,
-not the downstream service UIs.
+### Enabling SPNEGO
+
+1. Install the optional extra (needs MIT krb5 at build/runtime — on macOS:
+   `brew install krb5` then build with
+   `PKG_CONFIG_PATH=/opt/homebrew/opt/krb5/lib/pkgconfig`). Use `uv sync` so it
+   reads the kerberos extra from `uv.lock` (a lockless `uv pip install` can
+   resolve to an incompatible major `mcp`):
+   ```bash
+   uv sync --extra kerberos   # pulls in httpx-gssapi
+   ```
+2. Obtain a TGT (or otherwise populate the default ccache):
+   ```bash
+   kinit <user>@<REALM>
+   ```
+3. Enable the flag per CM instance — env (`CM_KERBEROS=true`) or yaml (`kerberos: true`):
+   ```bash
+   ALL_PROXY=socks5h://127.0.0.1:7890 \
+   REGISTRY_BACKEND=env CM_HOST=... CM_USERNAME=... CM_PASSWORD=... \
+     CM_KERBEROS=true cdp-mcp
+   ```
+
+When `kerberos=true`, the downstream clients are built with an `HTTPSPNEGOAuth`
+(via `clients/spnego.py`, lazy-imported so the base install stays krb5-free). If the
+extra is missing or no TGT is in the cache, the tool returns a structured
+`spnego_config_error` with an actionable message instead of a traceback.
+
+### When SPNEGO is NOT enabled
+
+If you leave `kerberos=false` on a Kerberized cluster, calling a downstream tool hits
+a `401 Negotiate` challenge; cdp-mcp detects this cleanly and returns a structured
+`spnego_required` error instead of a cryptic parse failure. By default
+(`disable_on_spnego: true` / `CM_DISABLE_ON_SPNEGO=true`), once a service is found to
+require SPNEGO on a cluster, cdp-mcp remembers this and short-circuits further calls
+to that tool immediately — no repeated round-trips or timeouts. Set it to `false` to
+always attempt the call fresh (useful while testing a Kerberos setup).
+
+### Notes
+- Run `get_cluster_security_info` first on an unfamiliar cluster to check its
+  TLS/Kerberos status upfront.
+- **Full tunneling setup** (SOCKS via SSH dynamic port forward + `kinit`/keytab
+  credentials + TGT renewal) is documented in
+  [docs/kerberos-tunneling.md](docs/kerberos-tunneling.md).
+- CM-API-based tools (`list_impala_queries`, `get_service_metrics`, `get_service_logs`,
+  etc.) work regardless of Kerberos, since they authenticate against CM itself, not the
+  downstream service UIs.
+- **Long-running server caveat:** because auth uses the default ccache, a daemon process
+  needs TGT renewal (cron `kinit -R`, or a keytab loaded into the ccache externally).
+  In-process keytab acquisition is a deferred to-do (see `CLAUDE.md`).
 
 ## License
 
