@@ -27,8 +27,11 @@ class ServiceEndpoints:
     disable_on_spnego: bool = True
     # When True, the downstream clients attach SPNEGO auth (from the CM
     # instance's kerberos flag) for Kerberized clusters. cm_client.py is
-    # unaffected (Basic auth).
+    # unaffected (Basic auth). kerberos_keytab/kerberos_principal enable
+    # in-process keytab acquisition (no external kinit); see clients/spnego.py.
     kerberos: bool = False
+    kerberos_keytab: str | None = None
+    kerberos_principal: str | None = None
     spnego_required: set[str] = field(default_factory=set)
 
 
@@ -127,6 +130,8 @@ class CMPool:
             downstream_timeout_seconds=client.cfg.downstream_timeout_seconds,
             disable_on_spnego=client.cfg.disable_on_spnego,
             kerberos=client.cfg.kerberos,
+            kerberos_keytab=client.cfg.kerberos_keytab,
+            kerberos_principal=client.cfg.kerberos_principal,
         )
 
         # Check for endpoints_override first
@@ -458,16 +463,21 @@ class CMPool:
     # ── Downstream client factories ──────────────────────────────────────────
     # Centralised construction point for the four downstream clients. When the
     # CM instance has kerberos=True, each client is built with an HTTPSPNEGOAuth
-    # (from spnego.py, using the default Kerberos credentials cache); otherwise
-    # auth=None (today's behaviour). Returns None if the endpoint was not
-    # discovered. build_spnego_auth may raise SpnegoConfigError (typed) if the
-    # optional httpx-gssapi extra is missing or no TGT is available — server.py
-    # surfaces that via its generic exception handler.
+    # (from spnego.py). Credentials come from the default ccache, or — when
+    # kerberos_keytab/kerberos_principal are set — from in-process keytab
+    # acquisition. auth=None when kerberos=False. Returns None if the endpoint
+    # was not discovered. build_spnego_auth may raise SpnegoConfigError (typed)
+    # if the optional httpx-gssapi extra is missing or no TGT is available —
+    # server.py surfaces that via its generic exception handler.
 
     def _spnego_auth(self, cluster_name: str):
         from cdp_mcp.clients.spnego import build_spnego_auth
         eps = self.get_endpoints(cluster_name)
-        return build_spnego_auth(eps.kerberos)
+        return build_spnego_auth(
+            eps.kerberos,
+            keytab=eps.kerberos_keytab,
+            principal=eps.kerberos_principal,
+        )
 
     def get_yarn_client(self, cluster_name: str):
         from cdp_mcp.clients.yarn_client import YarnClient

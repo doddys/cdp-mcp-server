@@ -57,6 +57,10 @@ ALL_PROXY=socks5h://127.0.0.1:7890 REGISTRY_BACKEND=file cdp-mcp
 internal-only hostnames. This requires the `httpx[socks]` extra (already a declared
 dependency — `uv sync --extra dev` pulls in `socksio` automatically).
 
+For the full jump-host + Kerberos setup (SSH dynamic port forward, `kinit`/keytab,
+TGT renewal, end-to-end recipe), see
+[docs/kerberos-tunneling.md](docs/kerberos-tunneling.md).
+
 ## Claude Desktop Configuration
 
 ### FileRegistry
@@ -179,9 +183,11 @@ credentials cache** (a `kinit` TGT, or a keytab you've loaded into the ccache).
 
 1. Install the optional extra (needs MIT krb5 at build/runtime — on macOS:
    `brew install krb5` then build with
-   `PKG_CONFIG_PATH=/opt/homebrew/opt/krb5/lib/pkgconfig`):
+   `PKG_CONFIG_PATH=/opt/homebrew/opt/krb5/lib/pkgconfig`). Use `uv sync` so it
+   reads the kerberos extra from `uv.lock` (a lockless `uv pip install` can
+   resolve to an incompatible major `mcp`):
    ```bash
-   uv pip install -e '.[kerberos]'   # pulls in httpx-gssapi
+   uv sync --extra kerberos   # pulls in httpx-gssapi
    ```
 2. Obtain a TGT (or otherwise populate the default ccache):
    ```bash
@@ -212,6 +218,9 @@ always attempt the call fresh (useful while testing a Kerberos setup).
 ### Notes
 - Run `get_cluster_security_info` first on an unfamiliar cluster to check its
   TLS/Kerberos status upfront.
+- **Full tunneling setup** (SOCKS via SSH dynamic port forward + `kinit`/keytab
+  credentials + TGT renewal) is documented in
+  [docs/kerberos-tunneling.md](docs/kerberos-tunneling.md).
 - CM-API-based tools (`list_impala_queries`, `get_service_metrics`, `get_service_logs`,
   etc.) work regardless of Kerberos, since they authenticate against CM itself, not the
   downstream service UIs.

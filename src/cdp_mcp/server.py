@@ -5,6 +5,7 @@ server.py — FastMCP server entry point for cdp-mcp.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from contextlib import asynccontextmanager
 from typing import Any
@@ -42,7 +43,49 @@ async def _lifespan(server):
     _registry.stop()
 
 
-mcp = FastMCP("cdp-mcp", lifespan=_lifespan)
+# ── Transport selection ──────────────────────────────────────────────────────
+# FastMCP (mcp 1.x) defaults to the stdio transport: it reads JSON-RPC from stdin
+# and writes to stdout, so it is meant to be spawned by an MCP client (Claude
+# Desktop / CLI) as a child process. Under a standalone systemd service stdin is
+# /dev/null → the server reads EOF and exits cleanly (exit 0) immediately after
+# startup. To run cdp-mcp as a long-lived network daemon instead, set
+# MCP_TRANSPORT=streamable-http (or sse) plus MCP_HOST/MCP_PORT. host/port are
+# bound at FastMCP construction (run() reads them from self.settings); the
+# transport is chosen at run() time. stdio stays the default so existing
+# Claude Desktop configs are unchanged.
+_VALID_TRANSPORTS = ("stdio", "sse", "streamable-http")
+
+
+def _resolve_transport_settings(
+    env: dict[str, str] | None = None,
+) -> tuple[str, str, int]:
+    """Read MCP_TRANSPORT / MCP_HOST / MCP_PORT from the environment.
+
+    Returns ``(transport, host, port)``. ``transport`` is one of
+    ``stdio`` / ``sse`` / ``streamable-http``. Defaults: stdio, 127.0.0.1, 8000.
+    """
+    e = env if env is not None else os.environ
+    transport = (e.get("MCP_TRANSPORT") or "stdio").strip().lower() or "stdio"
+    if transport not in _VALID_TRANSPORTS:
+        raise RuntimeError(
+            f"Unsupported MCP_TRANSPORT={transport!r}; expected one of "
+            f"{', '.join(_VALID_TRANSPORTS)}."
+        )
+    host = (e.get("MCP_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+    port_raw = e.get("MCP_PORT") or "8000"
+    try:
+        port = int(port_raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Invalid MCP_PORT={port_raw!r}; expected an integer."
+        ) from exc
+    return transport, host, port
+
+
+_transport, _host, _port = _resolve_transport_settings()
+# FastMCP reads host/port from self.settings (set at construction), so bind them
+# here from the environment; they are ignored under the stdio transport.
+mcp = FastMCP("cdp-mcp", lifespan=_lifespan, host=_host, port=_port)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1530,7 +1573,16 @@ def run() -> None:
         ),
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
     )
-    mcp.run()
+    # stdio (default): spawned by an MCP client over stdin/stdout. streamable-http
+    # / sse: long-lived network daemon (e.g. under systemd); clients connect over
+    # HTTP. Host/port were bound at FastMCP construction from MCP_HOST/MCP_PORT.
+    log.info(
+        "cdp_mcp.transport",
+        transport=_transport,
+        host=_host,
+        port=_port,
+    )
+    mcp.run(transport=_transport)
 
 
 if __name__ == "__main__":

@@ -29,7 +29,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp>=1.0.0",
+    # Cap <2: the MCP Python SDK's 2.0 major release removed `mcp.server.fastmcp`
+    # (FastMCP moved to the standalone `fastmcp` package), which server.py imports.
+    # A lockless `uv pip install -e .` would otherwise resolve to 2.0 and break.
+    # Use `uv sync` to install from uv.lock, which pins the 1.x version.
+    "mcp>=1.0.0,<2",
     "httpx[socks]>=0.27.0",
     "tenacity>=8.3.0",
     "pydantic>=2.7.0",

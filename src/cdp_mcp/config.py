@@ -25,12 +25,20 @@ class ClouderaManagerSettings:
     downstream_timeout_seconds: int = 30
     disable_on_spnego: bool = True
     # Kerberos / SPNEGO for the four downstream clients (YARN/Spark/HDFS/Oozie).
-    # When True, the clients attach an HTTPSPNEGOAuth that uses the default
-    # Kerberos credentials cache (a TGT obtained via `kinit`, or a keytab
-    # loaded into the ccache). cm_client.py is unaffected (Basic auth).
-    # Outbound proxying (e.g. socks5h://) is handled by httpx trust_env, which
-    # honours ALL_PROXY / HTTPS_PROXY / HTTP_PROXY env vars with no config here.
+    # When True, the clients attach an HTTPSPNEGOAuth. cm_client.py is unaffected
+    # (Basic auth). Outbound proxying (e.g. socks5h://) is handled by httpx
+    # trust_env, which honours ALL_PROXY / HTTPS_PROXY / HTTP_PROXY env vars
+    # with no config here.
     kerberos: bool = False
+    # In-process keytab acquisition (unattended production path). When
+    # `kerberos_keytab` is set, build_spnego_auth acquires a TGT directly from
+    # the keytab via gssapi.Credentials(store={'keytab': ...}) instead of
+    # reading the default credentials cache — so no external `kinit`/renewer is
+    # needed. `kerberos_principal` is required with it (the principal to
+    # acquire, e.g. "mcp-svc@REALM"). When both are unset, the auth falls back
+    # to the default ccache (a `kinit` TGT / keytab loaded into the ccache).
+    kerberos_keytab: str | None = None
+    kerberos_principal: str | None = None
     environment_name: str = "default"
     active: bool = True
     use_knox: bool = False

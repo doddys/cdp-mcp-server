@@ -80,6 +80,30 @@ def test_load_returns_one_instance(simple_yaml):
     assert instances[0].environment_name == "dev"
 
 
+def test_load_reads_keytab_config(tmp_path):
+    """kerberos_keytab/kerberos_principal yaml keys map onto the settings fields."""
+    data = {
+        "instances": [
+            {
+                "host": "cm.example.com",
+                "port": 7183,
+                "username": "admin",
+                "password": "secret",
+                "kerberos": True,
+                "kerberos_keytab": "/etc/cdp-mcp/mcp.keytab",
+                "kerberos_principal": "mcp-svc@REALM",
+            }
+        ]
+    }
+    p = tmp_path / "cm_instances.yaml"
+    p.write_text(yaml.safe_dump(data))
+    reg = FileRegistry(str(p))
+    inst = reg.load()[0]
+    assert inst.kerberos is True
+    assert inst.kerberos_keytab == "/etc/cdp-mcp/mcp.keytab"
+    assert inst.kerberos_principal == "mcp-svc@REALM"
+
+
 def test_get_all_after_start(simple_yaml):
     reg = FileRegistry(simple_yaml)
     reg.start()

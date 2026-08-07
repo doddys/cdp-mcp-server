@@ -14,6 +14,10 @@ Environment variables:
   CM_DOWNSTREAM_TIMEOUT_SECONDS  — default 30
   CM_DISABLE_ON_SPNEGO           — default "true"
   CM_KERBEROS                    — default "false" (use SPNEGO for downstream)
+  CM_KERBEROS_KEYTAB             — optional path to a keytab for in-process
+                                    TGT acquisition (no external kinit needed)
+  CM_KERBEROS_PRINCIPAL          — required when CM_KERBEROS_KEYTAB is set
+                                    (e.g. "mcp-svc@REALM")
   # Outbound proxy: set ALL_PROXY / HTTPS_PROXY env vars (httpx trust_env).
 """
 from __future__ import annotations
@@ -72,6 +76,12 @@ class EnvRegistry(BaseRegistry):
             # SPNEGO for downstream service endpoints only (NameNode/YARN/Spark/
             # Oozie). cm_client.py is unaffected — it always uses Basic auth.
             kerberos=_bool(os.environ.get("CM_KERBEROS", "false")),
+            # Optional in-process keytab acquisition (unattended production):
+            # when keytab is set, SPNEGO acquires a TGT from it via gssapi
+            # instead of the default ccache, so no external kinit/renewer is
+            # needed. principal is required when keytab is set.
+            kerberos_keytab=os.environ.get("CM_KERBEROS_KEYTAB") or None,
+            kerberos_principal=os.environ.get("CM_KERBEROS_PRINCIPAL") or None,
         )
         self._instance = [settings]
         log.info("env_registry.loaded", host=host)

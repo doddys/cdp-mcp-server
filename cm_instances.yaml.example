@@ -36,6 +36,13 @@ instances:
                                      # ccache). CM itself always uses Basic auth.
                                      # Outbound proxy: set ALL_PROXY env var
                                      # (e.g. socks5h://host:port) — httpx honours it.
+    # In-process keytab acquisition (unattended production): when
+    # kerberos_keytab is set, SPNEGO acquires a TGT directly from the keytab
+    # via gssapi (no external `kinit` / renewal cron needed). Requires
+    # kerberos: true and kerberos_principal. Leave both unset to use the
+    # default credentials cache instead.
+    # kerberos_keytab: /etc/cdp-mcp/mcp.keytab
+    # kerberos_principal: mcp-svc@REALM
     active: true                    # Set to false to disable without removing
 
   # ── Production CM with TLS ────────────────────────────────────────────────
