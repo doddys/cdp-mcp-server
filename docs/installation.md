@@ -34,13 +34,13 @@ cp cm_instances.yaml.example cm_instances.yaml
 ```yaml
 instances:
   - host: cm.example.com
-    port: 7180
+    port: 7183
     username: admin
     password: "${CM_PASSWORD}"
     environment_name: dev
-    use_tls: false
+    use_tls: true
     verify_ssl: false
-    api_version: v41   # adjust to your CM version
+    api_version: v51   # adjust to your CM version (v40–v54)
 ```
 
 Run:
@@ -53,11 +53,11 @@ REGISTRY_BACKEND=file cdp-mcp
 ```bash
 REGISTRY_BACKEND=env \
   CM_HOST=cm.example.com \
-  CM_PORT=7180 \
+  CM_PORT=7183 \
   CM_USERNAME=admin \
   CM_PASSWORD=changeme \
-  CM_USE_TLS=false \
-  CM_API_VERSION=v41 \
+  CM_USE_TLS=true \
+  CM_API_VERSION=v51 \
   cdp-mcp
 ```
 
@@ -78,11 +78,11 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
       "env": {
         "REGISTRY_BACKEND": "env",
         "CM_HOST": "cm.example.com",
-        "CM_PORT": "7180",
+        "CM_PORT": "7183",
         "CM_USERNAME": "admin",
         "CM_PASSWORD": "changeme",
-        "CM_USE_TLS": "false",
-        "CM_API_VERSION": "v41"
+        "CM_USE_TLS": "true",
+        "CM_API_VERSION": "v51"
       }
     }
   }
@@ -101,4 +101,5 @@ Different CM versions support different API versions:
 | CDH 7.0-7.1 | v40-v41 |
 | CDP 7.1.7+ | v51+ |
 
-Check your CM version at `http://cm-host:7180/api/version`.
+Check your CM version at `https://cm-host:7183/api/version` (TLS, default port) or
+`http://cm-host:7180/api/version` (no TLS).

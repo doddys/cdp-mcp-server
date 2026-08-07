@@ -233,7 +233,7 @@ instances:
     username: admin
     password: "${CM_PASSWORD}"
     environment_name: prod
-    use_tls: false
+    use_tls: true
     verify_ssl: false
     api_version: v51
     timeout_seconds: 30

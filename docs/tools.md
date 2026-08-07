@@ -130,8 +130,12 @@
 ### YARN/Spark/HDFS/Oozie tool returns a non-JSON / parse error?
 
 1. `get_cluster_security_info` → check `kerberos.kerberized`
-2. If `true`, the cluster requires SPNEGO for these service UIs, which is not
-   yet implemented (see `CLAUDE.md` roadmap) — use `list_impala_queries` /
+2. If `true`, the cluster requires SPNEGO for these service UIs. Enable it per
+   CM instance — env (`CM_KERBEROS=true`) or yaml (`kerberos: true`) — and obtain
+   credentials (a `kinit` TGT, or in-process keytab via `kerberos_keytab` +
+   `kerberos_principal`). See [docs/kerberos-tunneling.md](kerberos-tunneling.md)
+   for the full SOCKS + credentials setup.
+3. If you can't enable SPNEGO yet, use `list_impala_queries` /
    `get_service_metrics` / `get_service_logs` (all CM-API-based, no SPNEGO
    needed) for equivalent visibility where possible.
 
