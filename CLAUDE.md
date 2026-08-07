@@ -49,7 +49,7 @@ cp cm_instances.yaml.example cm_instances.yaml
 REGISTRY_BACKEND=file cdp-mcp
 
 # Quick start (EnvRegistry — single CM)
-REGISTRY_BACKEND=env CM_HOST=cm.example.com CM_USERNAME=admin CM_PASSWORD=changeme CM_USE_TLS=false cdp-mcp
+REGISTRY_BACKEND=env CM_HOST=cm.example.com CM_USERNAME=admin CM_PASSWORD=changeme CM_USE_TLS=true cdp-mcp
 ```
 
 ### Transports (stdio vs network daemon)
@@ -208,7 +208,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_clust
         "CM_HOST": "cm.example.com",
         "CM_USERNAME": "admin",
         "CM_PASSWORD": "changeme",
-        "CM_USE_TLS": "false"
+        "CM_USE_TLS": "true"
       }
     }
   }
@@ -260,7 +260,7 @@ SPNEGO auth when a CM instance has `kerberos=true` (`CM_KERBEROS=true` env /
 - Trade-off: system library dependency (MIT `libkrb5-dev`/`krb5-libs`) → heavier
   image, only when the `[kerberos]` extra is installed.
 
-### TODO — in-process keytab acquisition (implemented)
+### In-process keytab acquisition (implemented)
 The server supports two SPNEGO credential sources (see above). The default-ccache
 path still relies on a TGT already in the ccache, so a long-running process using
 *that* path needs TGT renewal (cron `kinit -R`, or a keytab loaded into the ccache

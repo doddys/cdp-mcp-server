@@ -22,7 +22,7 @@ instances:
     username: admin                 # CM username
     password: "${CM_DEV_PASSWORD}"  # Use env var for secrets
     environment_name: dev           # Logical environment name (for filtering)
-    use_tls: false                  # Use HTTPS (true) or HTTP (false)
+    use_tls: true                   # HTTPS (CM API on 7183). Set false + port 7180 for plain HTTP.
     verify_ssl: false               # Verify TLS certificate (true/false)
     api_version: v51                # CM API version (v40-v54 depending on CM version)
     timeout_seconds: 30             # HTTP timeout in seconds (CM core API calls)
@@ -81,7 +81,7 @@ instances:
   #   username: admin
   #   password: "${CM_PASSWORD}"
   #   environment_name: custom
-  #   use_tls: false
+  #   use_tls: true
   #   verify_ssl: false
   #   api_version: v51
   #   endpoints_override:

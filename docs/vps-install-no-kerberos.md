@@ -97,7 +97,7 @@ instances:
     username: admin
     password: "${CM_PASSWORD}"      # pulled from the env file below
     environment_name: prod
-    use_tls: false                   # set true + verify_ssl for HTTPS
+    use_tls: true                    # HTTPS (CM API on 7183); set false + port 7180 for plain HTTP
     verify_ssl: false
     api_version: v51                  # adjust to your CM version (v40–v54)
     timeout_seconds: 30

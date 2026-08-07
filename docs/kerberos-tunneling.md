@@ -241,7 +241,7 @@ instances:
     port: 7183
     username: admin
     password: "${CM_PASSWORD}"
-    use_tls: false
+    use_tls: true
     kerberos: true          # attach SPNEGO to the downstream clients
     disable_on_spnego: true
 ```

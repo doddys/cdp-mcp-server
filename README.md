@@ -32,7 +32,7 @@ REGISTRY_BACKEND=env \
   CM_HOST=cm.example.com \
   CM_USERNAME=admin \
   CM_PASSWORD=changeme \
-  CM_USE_TLS=false \
+  CM_USE_TLS=true \
   cdp-mcp
 ```
 
@@ -89,7 +89,7 @@ TGT renewal, end-to-end recipe), see
         "CM_HOST": "cm.example.com",
         "CM_USERNAME": "admin",
         "CM_PASSWORD": "changeme",
-        "CM_USE_TLS": "false"
+        "CM_USE_TLS": "true"
       }
     }
   }
@@ -173,8 +173,11 @@ to over HTTPS automatically when the role's config reports a TLS port (see
 
 On Kerberized clusters the YARN/Spark/HDFS/Oozie service UIs challenge with
 SPNEGO. cdp-mcp can attach SPNEGO auth to those four downstream clients so the tools
-work against Kerberized clusters. It is **opt-in** and uses the **default Kerberos
-credentials cache** (a `kinit` TGT, or a keytab you've loaded into the ccache).
+work against Kerberized clusters. It is **opt-in** and reads credentials from one of
+two sources: the **default Kerberos credentials cache** (a `kinit` TGT, or a keytab
+you've loaded into the ccache), or **in-process keytab acquisition** (`kerberos_keytab`
++ `kerberos_principal`), where gssapi acquires the TGT from the keytab on each call so
+no external `kinit`/renewer is needed.
 
 > CM itself always uses Basic auth — `kerberos` affects only the four downstream
 > service clients, never the CM API client.
@@ -189,10 +192,14 @@ credentials cache** (a `kinit` TGT, or a keytab you've loaded into the ccache).
    ```bash
    uv sync --extra kerberos   # pulls in httpx-gssapi
    ```
-2. Obtain a TGT (or otherwise populate the default ccache):
+2. Obtain credentials — either populate the default ccache:
    ```bash
    kinit <user>@<REALM>
    ```
+   or, for an unattended/daemon deployment, set `kerberos_keytab` +
+   `kerberos_principal` on the instance (`CM_KERBEROS_KEYTAB` /
+   `CM_KERBEROS_PRINCIPAL` env) so gssapi acquires the TGT from the keytab
+   in-process (no `kinit`, no renewal cron).
 3. Enable the flag per CM instance — env (`CM_KERBEROS=true`) or yaml (`kerberos: true`):
    ```bash
    ALL_PROXY=socks5h://127.0.0.1:7890 \
@@ -224,9 +231,11 @@ always attempt the call fresh (useful while testing a Kerberos setup).
 - CM-API-based tools (`list_impala_queries`, `get_service_metrics`, `get_service_logs`,
   etc.) work regardless of Kerberos, since they authenticate against CM itself, not the
   downstream service UIs.
-- **Long-running server caveat:** because auth uses the default ccache, a daemon process
+- **Long-running server caveat:** when using the default ccache, a daemon process
   needs TGT renewal (cron `kinit -R`, or a keytab loaded into the ccache externally).
-  In-process keytab acquisition is a deferred to-do (see `CLAUDE.md`).
+  To avoid that entirely, use in-process keytab acquisition (`kerberos_keytab` +
+  `kerberos_principal`) — gssapi re-acquires the TGT from the keytab on each downstream
+  call, so no external renewer is required. See [docs/kerberos-tunneling.md](docs/kerberos-tunneling.md).
 
 ## License
 

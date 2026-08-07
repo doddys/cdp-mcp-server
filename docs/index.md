@@ -8,7 +8,7 @@ Fork of [dvergari/cloudera-mcp-server](https://github.com/dvergari/cloudera-mcp-
 
 - **Pluggable registry**: FileRegistry (YAML), EnvRegistry (env vars), IcebergRegistry (Impala/Iceberg)
 - **Auto-discovery**: YARN, Spark History Server, HDFS NameNode, Oozie endpoints discovered from CM at startup
-- **22 MCP tools**: cluster management, service/role lifecycle, log extraction, metrics, YARN/Spark/HDFS/Oozie diagnostics
+- **44 MCP tools**: cluster management, service/role lifecycle, log extraction, metrics, replication, YARN/Spark/HDFS/Oozie diagnostics (full list in [tools.md](tools.md))
 - **No Iceberg required**: use FileRegistry or EnvRegistry for quick setup
 
 ## Quick Start
@@ -18,7 +18,7 @@ git clone https://github.com/doddys/cdp-mcp-server.git
 cd cdp-mcp-server
 uv venv --python 3.12
 uv sync --extra dev
-REGISTRY_BACKEND=env CM_HOST=your-cm CM_USERNAME=admin CM_PASSWORD=pass CM_USE_TLS=false CM_API_VERSION=v51 cdp-mcp
+REGISTRY_BACKEND=env CM_HOST=your-cm CM_USERNAME=admin CM_PASSWORD=pass CM_USE_TLS=true CM_API_VERSION=v51 cdp-mcp
 ```
 
 See [Installation](installation.md) for detailed setup instructions.
