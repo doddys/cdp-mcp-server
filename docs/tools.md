@@ -96,6 +96,7 @@
 | Tool | Description |
 |---|---|
 | `get_namenode_status` | NameNode health (HEALTHY / DEGRADED / CRITICAL), capacity, corrupt/missing blocks, HA state |
+| `get_hdfs_snapshots` | List snapshots of a directory (name + creation time, owner, group, permission) via WebHDFS `<path>/.snapshot` — read-only; the directory must be snapshottable (`hdfs dfs -allowSnapshot <path>`). On HA clusters it fails over across the discovered NameNodes to the active one (a standby rejects WebHDFS reads with `StandbyException`) |
 
 ## Oozie Tools
 

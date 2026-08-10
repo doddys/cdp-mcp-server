@@ -22,6 +22,11 @@ class ServiceEndpoints:
     yarn_rm_url: str | None = None
     spark_hs_url: str | None = None
     hdfs_nn_url: str | None = None
+    # All discovered NameNode HTTP URLs (HA clusters have ≥2). JMX is served by
+    # every NN, but WebHDFS reads are served only by the ACTIVE one — the standby
+    # rejects with StandbyException. The HdfsClient fails over across these
+    # candidates for WebHDFS read ops. hdfs_nn_url (the first) is kept for JMX.
+    hdfs_nn_candidates: list[str] = field(default_factory=list)
     oozie_url: str | None = None
     downstream_timeout_seconds: int = 30
     disable_on_spnego: bool = True
@@ -142,6 +147,7 @@ class CMPool:
             eps.spark_hs_url = override["spark_hs"]
         if override.get("hdfs_nn"):
             eps.hdfs_nn_url = override["hdfs_nn"]
+            eps.hdfs_nn_candidates = [eps.hdfs_nn_url]
         if override.get("oozie"):
             eps.oozie_url = override["oozie"]
 
@@ -302,33 +308,42 @@ class CMPool:
                 f"/clusters/{cluster_name}/services/{service_name}/roles"
             )
             for role in roles_data.get("items", []):
-                if role.get("type") == "NAMENODE":
-                    # Skip bad/standby namenodes if possible
-                    if role.get("healthSummary", "") == "BAD":
-                        continue
-                    hostname = role.get("hostRef", {}).get("hostname", "")
-                    if hostname:
-                        role_name = role.get("name", "")
-                        https_port = await self._get_role_config_value(
-                            cluster_name, client, service_name, role_name,
-                            "dfs_https_port",
-                        )
-                        if https_port:
-                            eps.hdfs_nn_url = f"https://{hostname}:{https_port}"
-                        else:
-                            port = await self._get_role_port(
-                                cluster_name, client, service_name,
-                                role_name,
-                                "dfs.namenode.http-address",
-                                default_port=9870,
-                            )
-                            eps.hdfs_nn_url = f"http://{hostname}:{port}"
-                        log.debug(
-                            "cm_pool.hdfs_nn_discovered",
-                            cluster=cluster_name,
-                            url=eps.hdfs_nn_url,
-                        )
-                        break
+                if role.get("type") != "NAMENODE":
+                    continue
+                # Skip bad namenodes; HA standby NNs are still GOOD, so we
+                # collect every healthy NN and let the HdfsClient fail over to
+                # the active one for WebHDFS reads (JMX is served by any NN).
+                if role.get("healthSummary", "") == "BAD":
+                    continue
+                hostname = role.get("hostRef", {}).get("hostname", "")
+                if not hostname:
+                    continue
+                role_name = role.get("name", "")
+                https_port = await self._get_role_config_value(
+                    cluster_name, client, service_name, role_name,
+                    "dfs_https_port",
+                )
+                if https_port:
+                    nn_url = f"https://{hostname}:{https_port}"
+                else:
+                    port = await self._get_role_port(
+                        cluster_name, client, service_name,
+                        role_name,
+                        "dfs.namenode.http-address",
+                        default_port=9870,
+                    )
+                    nn_url = f"http://{hostname}:{port}"
+                eps.hdfs_nn_candidates.append(nn_url)
+            # hdfs_nn_url (first candidate) is used for JMX, which every NN serves;
+            # hdfs_nn_candidates (all of them) drives WebHDFS failover.
+            if eps.hdfs_nn_candidates:
+                eps.hdfs_nn_url = eps.hdfs_nn_candidates[0]
+                log.debug(
+                    "cm_pool.hdfs_nn_discovered",
+                    cluster=cluster_name,
+                    url=eps.hdfs_nn_url,
+                    candidates=eps.hdfs_nn_candidates,
+                )
         except Exception as exc:
             log.warning(
                 "cm_pool.hdfs_discovery_error",
@@ -510,6 +525,7 @@ class CMPool:
             eps.hdfs_nn_url,
             timeout=eps.downstream_timeout_seconds,
             auth=self._spnego_auth(cluster_name),
+            candidates=eps.hdfs_nn_candidates or [eps.hdfs_nn_url],
         )
 
     def get_oozie_client(self, cluster_name: str):

@@ -8,7 +8,7 @@ Fork of [dvergari/cloudera-mcp-server](https://github.com/dvergari/cloudera-mcp-
 
 - **Pluggable registry**: FileRegistry (YAML), EnvRegistry (env vars), IcebergRegistry (Impala/Iceberg)
 - **Auto-discovery**: YARN, Spark History Server, HDFS NameNode, Oozie endpoints discovered from CM at startup
-- **44 MCP tools**: cluster management, service/role lifecycle, log extraction, metrics, replication, YARN/Spark/HDFS/Oozie diagnostics (full list in [tools.md](tools.md))
+- **45 MCP tools**: cluster management, service/role lifecycle, log extraction, metrics, replication, YARN/Spark/HDFS/Oozie diagnostics (full list in [tools.md](tools.md))
 - **No Iceberg required**: use FileRegistry or EnvRegistry for quick setup
 
 ## Quick Start
