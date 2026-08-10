@@ -1479,6 +1479,49 @@ async def get_namenode_status(cluster_name: str) -> str:
         return _dump({"error": f"HDFS error: {exc}"})
 
 
+@mcp.tool()
+async def get_hdfs_snapshots(cluster_name: str, path: str) -> str:
+    """
+    List the HDFS snapshots of a directory (snapshot name + creation time, owner,
+    group, permission) via the NameNode WebHDFS API at `<path>/.snapshot`. The
+    directory must be snapshottable (enable with `hdfs dfs -allowSnapshot <path>`);
+    if it isn't, or has no snapshots, the result reflects that — it does not
+    create or modify snapshots (read-only).
+
+    Args:
+      cluster_name: Cluster name.
+      path: HDFS directory path, e.g. `/data/warehouse`.
+    """
+    endpoints = _pool.get_endpoints(cluster_name)
+    if not endpoints.hdfs_nn_url:
+        return _dump(
+            {
+                "error": (
+                    f"HDFS NameNode endpoint not found for cluster '{cluster_name}'. "
+                    "Ensure the HDFS service is running."
+                )
+            }
+        )
+    if not endpoints.kerberos and endpoints.disable_on_spnego and "hdfs" in endpoints.spnego_required:
+        return _spnego_error("HDFS NameNode")
+    try:
+        client = _pool.get_hdfs_client(cluster_name)
+        return _dump(await client.get_directory_snapshots(path))
+    except SpnegoRequiredError:
+        _pool.mark_spnego_required(cluster_name, "hdfs")
+        return _spnego_error("HDFS NameNode")
+    except Exception as exc:
+        return _dump(
+            {
+                "error": f"HDFS error: {exc}",
+                "hint": (
+                    "ensure the path is snapshottable (hdfs dfs -allowSnapshot <path>) "
+                    "and exists, and that WebHDFS is enabled (dfs.webhdfs.enabled=true)"
+                ),
+            }
+        )
+
+
 # ── Oozie tools ───────────────────────────────────────────────────────────────
 
 @mcp.tool()

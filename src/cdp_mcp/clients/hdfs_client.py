@@ -1,8 +1,10 @@
 """
-hdfs_client.py — Async client for HDFS NameNode JMX API.
+hdfs_client.py — Async client for HDFS NameNode JMX + WebHDFS APIs.
 """
 from __future__ import annotations
 
+import urllib.parse
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -37,10 +39,18 @@ class HdfsClient:
         base_url: str,
         timeout: int = 30,
         auth: Any = None,
+        candidates: list[str] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._auth = auth
+        # All NameNode HTTP URLs (HA clusters have ≥2). JMX is served by every
+        # NN; WebHDFS reads are served only by the active NN, so the client
+        # fails over across candidates on a StandbyException. Defaults to the
+        # single base_url for non-HA clusters.
+        self._candidates = [c.rstrip("/") for c in candidates] if candidates else [
+            self._base_url
+        ]
 
     def _retry_dec(self):
         return retry(
@@ -52,18 +62,24 @@ class HdfsClient:
             reraise=True,
         )
 
-    async def _jmx(self, qry: str) -> dict:
+    async def _get_json(self, url_path: str, params: dict, base_url: str | None = None) -> dict:
+        """GET a JSON endpoint on the NameNode HTTP server (JMX or WebHDFS)
+        with retry, SPNEGO, and the shared error mapping. Returns parsed JSON.
+        ``base_url`` overrides the configured NN (used to try each HA candidate).
+        """
+        base = (base_url or self._base_url).rstrip("/")
+
         @self._retry_dec()
         async def _execute() -> dict:
             async with httpx.AsyncClient(
-                base_url=self._base_url,
+                base_url=base,
                 auth=self._auth,
                 timeout=self._timeout,
                 verify=False,
                 follow_redirects=True,
             ) as client:
                 try:
-                    resp = await client.get("/jmx", params={"qry": qry})
+                    resp = await client.get(url_path, params=params)
                 except httpx.TransportError:
                     raise
                 if resp.status_code == 401:
@@ -74,7 +90,9 @@ class HdfsClient:
                         f"HDFS NN unavailable: {resp.status_code}"
                     )
                 if resp.status_code >= 400:
-                    raise HdfsClientError(f"HDFS JMX HTTP {resp.status_code}")
+                    raise HdfsClientError(
+                        f"HDFS HTTP {resp.status_code}: {resp.text[:300]}"
+                    )
                 try:
                     return resp.json()
                 except ValueError as exc:
@@ -91,6 +109,9 @@ class HdfsClient:
                     ) from exc
 
         return await _execute()
+
+    async def _jmx(self, qry: str) -> dict:
+        return await self._get_json("/jmx", {"qry": qry})
 
     async def get_namenode_status(self) -> dict:
         """Get HDFS NameNode status from JMX."""
@@ -142,4 +163,93 @@ class HdfsClient:
             ),
             "active_namenode": nn.get("HostAndPort"),
             "ha_state": nn.get("State"),
+        }
+
+    async def get_directory_snapshots(self, path: str) -> dict:
+        """List the snapshots of an HDFS directory via WebHDFS.
+
+        Hits the NameNode WebHDFS API (same host:port as JMX, same auth) at
+        ``/webhdfs/v1{path}/.snapshot?op=LISTSTATUS``. Each snapshot appears as a
+        ``FileStatus`` entry — ``pathSuffix`` is the snapshot name and
+        ``modificationTime`` (ms epoch) is its creation time. This op works on
+        every Hadoop version that supports snapshots (the newer
+        ``GETSNAPSHOTLIST`` adds snapshotID/deletionStatus but is Hadoop 3.4+).
+
+        Args:
+            path: HDFS directory path (must be snapshottable), e.g. ``/data/warehouse``.
+
+        Returns:
+            A bounded envelope ``{path, count, snapshots, truncated}`` where each
+            snapshot is ``{snapshot_name, creation_time, owner, group,
+            permission, type, children_num, size}``.
+
+        Raises:
+            HdfsClientError: if the path isn't snapshottable / doesn't exist /
+                WebHDFS is disabled (the WebHDFS ``RemoteException`` message is
+                carried in the error text), or if every candidate NameNode is
+                standby/unavailable (HA — the active NN couldn't be reached).
+            SpnegoRequiredError: if the endpoint challenges with SPNEGO.
+            HdfsServiceUnavailable: only if every candidate NN returns 503/504.
+        """
+        norm = path.rstrip("/")
+        url_path = "/webhdfs/v1" + urllib.parse.quote(norm, safe="/") + "/.snapshot"
+
+        # WebHDFS reads are served ONLY by the active NameNode. On an HA cluster
+        # a standby NN rejects with StandbyException (HTTP 403, "...state
+        # standby"); it does not redirect. Try each candidate, failing over on a
+        # standby rejection (and on a unavailable NN). A non-standby error — e.g.
+        # the path isn't snapshottable — is raised immediately, since failover
+        # won't help a path problem. SpnegoRequiredError propagates: the whole
+        # cluster needs SPNEGO, so the next candidate would reject the same way.
+        data: dict | None = None
+        last_error: Exception | None = None
+        for base in self._candidates:
+            try:
+                data = await self._get_json(
+                    url_path, {"op": "LISTSTATUS"}, base_url=base
+                )
+                break
+            except HdfsServiceUnavailable as exc:
+                last_error = exc
+                continue  # NN down/unavailable → try the next candidate
+            except HdfsClientError as exc:
+                msg = str(exc).lower()
+                if "standbyexception" in msg or "state standby" in msg:
+                    last_error = exc
+                    continue  # standby → fail over to the active NN
+                raise  # path error (not snapshottable / not found) — don't fail over
+
+        if data is None:
+            raise HdfsClientError(
+                "All HDFS NameNodes rejected the WebHDFS read (standby or "
+                f"unavailable). Last error: {last_error}"
+            )
+
+        statuses = (data.get("FileStatuses") or {}).get("FileStatus") or []
+
+        snapshots = []
+        for s in statuses:
+            ms = s.get("modificationTime") or 0
+            snapshots.append(
+                {
+                    "snapshot_name": s.get("pathSuffix"),
+                    "creation_time": (
+                        datetime.fromtimestamp(ms / 1000, tz=UTC).isoformat()
+                        if ms
+                        else None
+                    ),
+                    "owner": s.get("owner"),
+                    "group": s.get("group"),
+                    "permission": s.get("permission"),
+                    "type": s.get("type"),
+                    "children_num": s.get("childrenNum"),
+                    "size": s.get("length"),
+                }
+            )
+
+        return {
+            "path": path,
+            "count": len(snapshots),
+            "snapshots": snapshots,
+            "truncated": False,
         }
