@@ -32,7 +32,7 @@ class ClouderaManagerSettings:
     kerberos: bool = False
     # In-process keytab acquisition (unattended production path). When
     # `kerberos_keytab` is set, build_spnego_auth acquires a TGT directly from
-    # the keytab via gssapi.Credentials(store={'keytab': ...}) instead of
+    # the keytab via gssapi.Credentials(store={'client_keytab': ...}) instead of
     # reading the default credentials cache — so no external `kinit`/renewer is
     # needed. `kerberos_principal` is required with it (the principal to
     # acquire, e.g. "mcp-svc@REALM"). When both are unset, the auth falls back

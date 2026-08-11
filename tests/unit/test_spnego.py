@@ -133,7 +133,10 @@ def test_keytab_mode_acquires_credentials_from_keytab(monkeypatch, tmp_path):
     assert captured["principal"] == "mcp-svc@REALM"
     assert captured["name_type"] == "KRB_PRINC"
     assert captured["creds_kwargs"]["usage"] == "initiate"
-    assert captured["creds_kwargs"]["store"] == {"keytab": str(kt)}
+    assert captured["creds_kwargs"]["store"] == {
+        "client_keytab": str(kt),
+        "ccache": "MEMORY:cdp-mcp",
+    }
     assert isinstance(captured["creds_kwargs"]["name"], object)  # FakeName
     assert captured["auth_creds"] is auth.creds
 
