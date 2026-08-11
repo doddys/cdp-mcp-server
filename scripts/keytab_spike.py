@@ -19,7 +19,7 @@ Usage (on the VPS, with the autossh SOCKS tunnel + the KDC TCP forward up):
   SPNEGO_URL=https://nn-1.cluster.internal:9871/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState \
   SPNEGO_PROXY=socks5h://127.0.0.1:8760 \
   KEYTAB=/etc/cdp-mcp/mcp.keytab \
-  PRINCIPAL=expc_monitor@CLOUD.INTRA.ASTRAFINANCIAL.CO.ID \
+  PRINCIPAL=mcp-svc@EXAMPLE.CO.ID \
     .venv/bin/python scripts/keytab_spike.py
 
   # optional: SPNEGO_QRY="Hadoop:service=NameNode,name=NameNodeStatus" to override

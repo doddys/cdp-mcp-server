@@ -45,6 +45,9 @@ RUN
 
 # Local operational prompt templates (contain real cluster names)
 .claude/prompts/cluster-health-report.md
+# Local Claude Code session/report data — may contain real cluster names/hosts
+.claude/sessions/
+.claude/reports/
 
 # IDE
 .vscode/settings.json
