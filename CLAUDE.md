@@ -244,7 +244,7 @@ SPNEGO auth when a CM instance has `kerberos=true` (`CM_KERBEROS=true` env /
     `kerberos_keytab` + `kerberos_principal` on the instance (`CM_KERBEROS_KEYTAB`
     / `CM_KERBEROS_PRINCIPAL` env). `build_spnego_auth` acquires a TGT directly
     from the keytab via `gssapi.Credentials(usage='initiate', name=..., store=
-    {'keytab': ...})` and hands it to `HTTPSPNEGOAuth(creds=...)`. The downstream
+    {'client_keytab': ...})` and hands it to `HTTPSPNEGOAuth(creds=...)`. The downstream
     client factories rebuild the auth per tool invocation, so the TGT is
     re-acquired from the keytab on each call — automatic renewal, no external
     `kinit`/cron needed. Validation failures (missing principal, missing/unreadable

@@ -15,7 +15,7 @@ Design notes
       keep that ccache valid (cron `kinit -R` / a keytab-renewed TGT).
     * In-process keytab acquisition (unattended production): `keytab` +
       `principal` passed. We acquire a TGT directly from the keytab via
-      `gssapi.Credentials(usage='initiate', name=..., store={'keytab': ...})`
+      `gssapi.Credentials(usage='initiate', name=..., store={'client_keytab': ...})`
       and hand it to `HTTPSPNEGOAuth(creds=...)`. gssapi re-reads the keytab,
       so no external `kinit`/renewer is required.
 - Renewal: the downstream client factories in cm_pool.py build a fresh client
@@ -150,12 +150,16 @@ def _build_keytab_auth(keytab: str, principal: str | None) -> Any:
 
     try:
         name = gssapi.Name(principal, gssapi.NameType.kerberos_principal)
-        # cred_store extension: acquire a TGT from the keytab without touching
-        # the default ccache. usage='initiate' => client (TGT) credentials.
+        # cred_store extension: acquire a TGT in-process from the keytab.
+        # IMPORTANT: the store key for INITIATING (client TGT, kinit-equivalent
+        # AS-REQ) is 'client_keytab' — NOT 'keytab', which is the acceptor/
+        # service keytab and does NOT acquire a TGT. The TGT is stored in a
+        # process-local MEMORY ccache (no default-ccache pollution, no
+        # KRB5CCNAME). usage='initiate' => client credentials.
         creds = gssapi.Credentials(
             usage="initiate",
             name=name,
-            store={"keytab": keytab},
+            store={"client_keytab": keytab, "ccache": "MEMORY:cdp-mcp"},
         )
         auth = HTTPSPNEGOAuth(creds=creds)
     except Exception as exc:
@@ -163,7 +167,9 @@ def _build_keytab_auth(keytab: str, principal: str | None) -> Any:
         raise SpnegoConfigError(
             "Kerberos/SPNEGO keytab acquisition failed. Verify the keytab "
             f"contains principal {principal!r}, the realm/KDC in krb5.conf is "
-            f"correct, and the KDC is reachable. Underlying error: {exc}"
+            f"correct, and the KDC is reachable (gssapi does the AS-REQ over "
+            f"krb5, not ALL_PROXY — the KDC must be directly reachable or via a "
+            f"TCP forward such as localhost:1088). Underlying error: {exc}"
         ) from exc
 
     log.info(
