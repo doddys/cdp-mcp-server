@@ -362,9 +362,10 @@ WorkingDirectory=/opt/cdp-mcp-server
 # Run as a long-lived HTTP daemon (NOT stdio). A stdio server under systemd reads
 # EOF on /dev/null stdin and exits cleanly right after startup — useless as a
 # service. streamable-http keeps a uvicorn listener up; clients connect to
-# http://<host>:8000/mcp. Bind to loopback and reach it over an SSH tunnel
-# (§6) — the HTTP transport has NO built-in auth, so never set MCP_HOST=0.0.0.0
-# on a public VPS without a reverse proxy / firewall in front.
+# http://<host>:8000/mcp. Bind to loopback and reach it over an SSH tunnel (§6).
+# The endpoint is open by default; set MCP_AUTH_TOKEN (below) to gate it with a
+# bearer token. Even with the token, prefer loopback + SSH tunnel — don't expose
+# MCP_HOST=0.0.0.0 on a public VPS without a reverse proxy / firewall in front.
 Environment=MCP_TRANSPORT=streamable-http
 Environment=MCP_HOST=127.0.0.1
 Environment=MCP_PORT=8000
@@ -563,6 +564,7 @@ to see the service URLs auto-discovery will use.
 |---|---|
 | `cdp-mcp.service` exits 0 right after `cdp_mcp.ready` ("Deactivated successfully") | Missing `MCP_TRANSPORT=streamable-http` on the unit → defaults to stdio → reads EOF on `/dev/null` stdin and exits cleanly. Add the env var (§5) and `systemctl restart cdp-mcp`. |
 | `Connection refused on 127.0.0.1:8000` | Unit not running or crashed — `systemctl status cdp-mcp`, `journalctl -u cdp-mcp`. |
+| `401 Unauthorized` / `WWW-Authenticate: Bearer` from every request | `MCP_AUTH_TOKEN` is set on the unit but the client isn't sending `Authorization: Bearer <token>` (or the wrong token). Check the journal for `cdp_mcp.auth_enabled`; add the header to the client config (§6). |
 | `[Errno 8] nodename nor servname` | Used `socks5://` — switch to `socks5h://` (remote DNS). |
 | `Connection refused on 127.0.0.1:1080` | autossh tunnel down — `systemctl status cdp-mcp-autossh`, check `IdentityFile`/known_hosts. |
 | `spnego_config_error: httpx-gssapi not installed` | Reinstall with `[kerberos]` extra (§3); confirm `python -c "import httpx_gssapi"`. |
@@ -592,5 +594,6 @@ to see the service URLs auto-discovery will use.
 - [ ] `cdp-mcp-autossh.service` enabled, listening on `127.0.0.1:1080` (§4.2).
 - [ ] Tunnel verify: `curl` through `socks5h://` returns `401 Negotiate` (§4.3).
 - [ ] `cdp-mcp.service` enabled with `MCP_TRANSPORT=streamable-http`, `MCP_HOST=127.0.0.1`; `ALL_PROXY` set; `KRB5CCNAME` set only for B1 (§5).
+- [ ] (Recommended) `MCP_AUTH_TOKEN` set on the unit; client sends `Authorization: Bearer <token>` (§6).
 - [ ] `curl http://127.0.0.1:8000/mcp` returns an HTTP response (listener up) (§7).
 - [ ] Client reaches the loopback endpoint over an SSH tunnel (§6A).
