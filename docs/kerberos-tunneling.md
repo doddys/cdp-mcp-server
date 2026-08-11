@@ -131,7 +131,7 @@ Simplest path. Get a ticket-granting ticket from your KDC:
 
 ```bash
 kinit <user>@<REALM>
-# e.g. kinit expc_doddy@CLOUD.INTRA.EXAMPLE.CO.ID
+# e.g. kinit mcp-svc@EXAMPLE.CO.ID
 
 klist          # confirm: should show a krbtgt/<REALM>@<REALM> entry
 ```
