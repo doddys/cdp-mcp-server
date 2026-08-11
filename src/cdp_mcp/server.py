@@ -4,6 +4,7 @@ server.py — FastMCP server entry point for cdp-mcp.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import sys
@@ -1604,6 +1605,95 @@ async def list_oozie_jobs(
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+class _BearerAuthMiddleware:
+    """ASGI middleware gating HTTP requests with a shared-secret bearer token.
+
+    Rejects (401) any http/websocket request whose ``Authorization`` header is
+    missing or doesn't match ``Authorization: Bearer <expected>``. Non-HTTP scopes
+    (lifespan startup/shutdown) pass through. This is a lightweight shared-secret
+    gate (NOT OAuth) — the secret is configured via ``MCP_AUTH_TOKEN``. A reverse
+    proxy in front may set/forward the ``Authorization`` header.
+
+    Constant-time comparison (``hmac.compare_digest``) so the gate doesn't leak
+    how close a wrong token was.
+    """
+
+    def __init__(self, app: Any, expected_token: str) -> None:
+        self._app = app
+        self._expected = expected_token
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") not in ("http", "websocket"):
+            # lifespan and other non-HTTP scopes pass through unconditionally.
+            await self._app(scope, receive, send)
+            return
+
+        token: str | None = None
+        for name, value in scope.get("headers", ()):
+            if name.lower() == b"authorization":
+                try:
+                    header = value.decode("latin-1")
+                except UnicodeDecodeError:
+                    header = ""
+                if header.lower().startswith("bearer "):
+                    token = header[7:].strip()
+                break
+
+        if token is not None and hmac.compare_digest(token, self._expected):
+            await self._app(scope, receive, send)
+            return
+        await _send_unauthorized(send)
+
+
+async def _send_unauthorized(send: Any) -> None:
+    """ASGI 401 response with a WWW-Authenticate: Bearer challenge."""
+    body = json.dumps(
+        {"error": "unauthorized", "hint": "Authorization: Bearer <MCP_AUTH_TOKEN> required"}
+    ).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+                (b"www-authenticate", b"Bearer"),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+def _run_http_server() -> None:
+    """Run the streamable-http (or sse) Starlette app under uvicorn, optionally
+    wrapped in the bearer-token auth middleware when MCP_AUTH_TOKEN is set.
+
+    We wrap ``mcp.streamable_http_app()`` ourselves (instead of
+    ``mcp.run(transport="streamable-http")``) so we can layer the shared-secret
+    middleware without pulling in FastMCP's OAuth machinery — which standard MCP
+    clients would try to negotiate and which is the wrong fit for a static token.
+    """
+    import anyio
+
+    async def _serve() -> None:
+        import uvicorn
+
+        app = mcp.streamable_http_app()
+        auth_token = os.environ.get("MCP_AUTH_TOKEN") or None
+        if auth_token:
+            app = _BearerAuthMiddleware(app, auth_token)
+            log.info("cdp_mcp.auth_enabled", scheme="bearer", header="Authorization")
+        config = uvicorn.Config(
+            app,
+            host=_host,
+            port=_port,
+            log_level=server_cfg.log_level.lower(),
+        )
+        await uvicorn.Server(config).serve()
+
+    anyio.run(_serve)
+
+
 def run() -> None:
     """Entry point invoked by the cdp-mcp console script."""
     import structlog
@@ -1625,7 +1715,13 @@ def run() -> None:
         host=_host,
         port=_port,
     )
-    mcp.run(transport=_transport)
+    if _transport == "streamable-http":
+        # streamable-http goes through our runner so MCP_AUTH_TOKEN (if set)
+        # gates the endpoint with the bearer-token middleware.
+        _run_http_server()
+    else:
+        # stdio (default) / sse: FastMCP handles them directly (no HTTP auth).
+        mcp.run(transport=_transport)
 
 
 if __name__ == "__main__":

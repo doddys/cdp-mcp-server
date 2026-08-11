@@ -368,6 +368,11 @@ WorkingDirectory=/opt/cdp-mcp-server
 Environment=MCP_TRANSPORT=streamable-http
 Environment=MCP_HOST=127.0.0.1
 Environment=MCP_PORT=8000
+# Shared-secret bearer gate (recommended): generate a secret with
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"
+# and set it here. Clients must then send `Authorization: Bearer <secret>` or
+# they get 401. A reverse proxy in front may set/forward that header.
+#Environment=MCP_AUTH_TOKEN=<your-secret>
 
 # Kerberos ccache (B1 only) — MUST match the kinit service + timer (§2.3/§2.4).
 # B2 (in-process keytab) does not use the ccache: drop this line.
@@ -460,6 +465,15 @@ Then point a streamable-HTTP-capable MCP client at the local end of the tunnel:
   }
 }
 ```
+
+> If you set `MCP_AUTH_TOKEN` on the unit, the client must send the bearer token,
+> e.g. via a `headers` field (supported by streamable-HTTP-capable MCP clients):
+> ```json
+> { "mcpServers": { "cdp": { "url": "http://127.0.0.1:8000/mcp",
+>   "headers": { "Authorization": "Bearer <your-secret>" } } } }
+> ```
+> Without it, the server returns 401. (With the MCP Inspector, set the header in
+> the transport config; with curl, add `-H 'Authorization: Bearer <your-secret>'`.)
 
 The laptop needs no Kerberos, no keytab, no SOCKS proxy — all of that lives on the
 VPS inside the systemd unit. The SSH tunnel is the auth/transport boundary.

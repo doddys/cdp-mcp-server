@@ -150,6 +150,11 @@ WorkingDirectory=/opt/cdp-mcp-server
 Environment=MCP_TRANSPORT=streamable-http
 Environment=MCP_HOST=127.0.0.1
 Environment=MCP_PORT=8000
+# Shared-secret bearer gate (recommended): generate a secret with
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"
+# and set it here. Clients must then send `Authorization: Bearer <secret>` or
+# they get 401. A reverse proxy in front may set/forward that header.
+#Environment=MCP_AUTH_TOKEN=<your-secret>
 
 # Registry
 Environment=REGISTRY_BACKEND=file
@@ -228,6 +233,10 @@ ssh -L 8000:127.0.0.1:8000 -N cdp@vps.example.com
   }
 }
 ```
+
+> If you set `MCP_AUTH_TOKEN` on the unit, send the bearer token via a `headers`
+> field: `"headers": { "Authorization": "Bearer <your-secret>" }`. Without it the
+> server returns 401.
 
 ### B. Client on the VPS itself
 

@@ -65,6 +65,17 @@ startup. Use the HTTP transport for a systemd daemon; clients connect to
 auth — keep the bind on 127.0.0.1 (SSH-tunnel in) or put auth/reverse-proxy in
 front; never expose `MCP_HOST=0.0.0.0` on a public VPS unprotected.
 
+**Shared-secret bearer gate (optional):** set `MCP_AUTH_TOKEN` to gate the
+streamable-http/sse endpoint — requests must then send
+`Authorization: Bearer <MCP_AUTH_TOKEN>` or they get 401. Implemented as a small
+ASGI middleware (`server._BearerAuthMiddleware`) that wraps
+`mcp.streamable_http_app()` (run via `server._run_http_server`), NOT FastMCP's
+OAuth `token_verifier` — a static shared secret is the wrong fit for the OAuth
+flow standard MCP clients negotiate. Constant-time compare (`hmac.compare_digest`);
+non-HTTP scopes (lifespan) pass through; stdio is unaffected. Unset = open
+(loopback + SSH tunnel only). A reverse proxy in front may set/forward the
+`Authorization` header.
+
 ---
 
 ## Code structure
