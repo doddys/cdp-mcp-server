@@ -144,9 +144,10 @@ WorkingDirectory=/opt/cdp-mcp-server
 # Run as a long-lived HTTP daemon (NOT stdio). A stdio server under systemd
 # reads EOF on /dev/null stdin and exits cleanly right after startup — useless
 # as a service. streamable-http keeps a uvicorn listener up; clients connect to
-# http://<host>:8000/mcp. Bind to loopback and reach it over an SSH tunnel (§5)
-# — the HTTP transport has NO built-in auth, so never set MCP_HOST=0.0.0.0 on a
-# public VPS without a reverse proxy / firewall in front.
+# http://<host>:8000/mcp. Bind to loopback and reach it over an SSH tunnel (§5).
+# The endpoint is open by default; set MCP_AUTH_TOKEN (below) to gate it with a
+# bearer token. Even with the token, prefer loopback + SSH tunnel — don't expose
+# MCP_HOST=0.0.0.0 on a public VPS without a reverse proxy / firewall in front.
 Environment=MCP_TRANSPORT=streamable-http
 Environment=MCP_HOST=127.0.0.1
 Environment=MCP_PORT=8000
@@ -379,6 +380,7 @@ the service URLs auto-discovery will use.
 |---|---|
 | `cdp-mcp.service` exits 0 right after `cdp_mcp.ready` ("Deactivated successfully") | Missing `MCP_TRANSPORT=streamable-http` on the unit → defaults to stdio → reads EOF on `/dev/null` stdin and exits cleanly. Add the env var (§4) and `systemctl restart cdp-mcp`. |
 | `Connection refused on 127.0.0.1:8000` | Unit not running or crashed — `systemctl status cdp-mcp`, `journalctl -u cdp-mcp`. |
+| `401 Unauthorized` / `WWW-Authenticate: Bearer` from every request | `MCP_AUTH_TOKEN` is set on the unit but the client isn't sending `Authorization: Bearer <token>` (or the wrong token). Check the journal for `cdp_mcp.auth_enabled`; add the header to the client config (§5). |
 | `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` | Installed lockless (`uv pip install -e`) → got `mcp` 2.0. Reinstall with `uv sync --extra dev` (uses the lock's 1.x pin). |
 | `ModuleNotFoundError: No module named 'mcp'` | The editable install didn't complete — re-run `uv sync --extra dev`. |
 | `401` + `www-authenticate: negotiate` from a downstream endpoint | The cluster **is** Kerberized — switch to [vps-install.md](vps-install.md). |
@@ -397,6 +399,7 @@ the service URLs auto-discovery will use.
 - [ ] Secrets in `/etc/cdp-mcp/cdp-mcp.env`, `chmod 600`, owned by `cdp` (§3).
 - [ ] `cdp` service user created; owns `/opt/cdp-mcp-server` (§4).
 - [ ] `cdp-mcp.service` enabled with `MCP_TRANSPORT=streamable-http`, `MCP_HOST=127.0.0.1`; no `KRB5CCNAME`, no autossh `Requires=` (§4).
+- [ ] (Recommended) `MCP_AUTH_TOKEN` set on the unit; client sends `Authorization: Bearer <token>` (§5).
 - [ ] `curl http://127.0.0.1:8000/mcp` returns an HTTP response (listener up) (§7).
 - [ ] (If internal-only) §6 autossh tunnel up + `ALL_PROXY=socks5h://` set (§6).
 - [ ] Client reaches the loopback endpoint over an SSH tunnel (§5A).
