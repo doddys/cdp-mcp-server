@@ -4,6 +4,7 @@ server.py — FastMCP server entry point for cdp-mcp.
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import os
@@ -26,22 +27,55 @@ log = structlog.get_logger(__name__)
 server_cfg = ServerSettings()
 _registry = None
 _pool: CMPool | None = None
+_lifespan_lock = asyncio.Lock()
+_active_sessions = 0
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
-
+# NOTE: under the streamable-http/sse transports, the mcp library's
+# StreamableHTTPSessionManager invokes this lifespan once per *session*, not
+# once per process (each concurrent client connection gets its own
+# `Server.run()` call). _registry/_pool are process-wide singletons shared by
+# every tool call via module-level globals, so treating them as per-session
+# state and tearing them down on every session exit races: one session's
+# stop() can close the httpx clients a different, still-active session is
+# using mid-request ("Client not initialised" AssertionError). Reference-count
+# sessions instead: the first session in starts the shared pool, the last
+# session out stops it. For stdio there is exactly one session per process,
+# so this behaves exactly as a plain start/stop.
 @asynccontextmanager
 async def _lifespan(server):
-    global _registry, _pool
-    _registry = build_registry(server_cfg)
-    _registry.start()
-    instances = _registry.get_all()
-    _pool = CMPool(instances, server_cfg)
-    await _pool.start()
-    log.info("cdp_mcp.ready", instances=len(instances))
-    yield
-    await _pool.stop()
-    _registry.stop()
+    global _registry, _pool, _active_sessions
+    async with _lifespan_lock:
+        if _pool is None:
+            try:
+                _registry = build_registry(server_cfg)
+                _registry.start()
+                instances = _registry.get_all()
+                _pool = CMPool(instances, server_cfg)
+                await _pool.start()
+                log.info("cdp_mcp.ready", instances=len(instances))
+            except Exception:
+                # Startup failed partway through: don't leave a half-built
+                # pool/registry sitting in the globals, or every subsequent
+                # session will see `_pool is not None` and silently reuse
+                # the broken instance instead of retrying.
+                _pool = None
+                _registry = None
+                raise
+        _active_sessions += 1
+    try:
+        yield
+    finally:
+        async with _lifespan_lock:
+            _active_sessions -= 1
+            if _active_sessions == 0:
+                try:
+                    await _pool.stop()
+                    _registry.stop()
+                finally:
+                    _pool = None
+                    _registry = None
 
 
 # ── Transport selection ──────────────────────────────────────────────────────
