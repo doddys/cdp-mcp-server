@@ -76,6 +76,23 @@ non-HTTP scopes (lifespan) pass through; stdio is unaffected. Unset = open
 (loopback + SSH tunnel only). A reverse proxy in front may set/forward the
 `Authorization` header.
 
+**Concurrent sessions share one CMPool (ref-counted singleton):** under
+streamable-http/sse, the `mcp` library's `StreamableHTTPSessionManager` invokes
+`server._lifespan()` once per **session** (each client connection gets its own
+`Server.run()` call), not once per process. A single MCP client naturally
+produces overlapping sessions on a long-lived daemon — reconnect after a
+network blip, client restart, multiple editor windows/tabs pointed at the same
+endpoint — so `_lifespan` must not treat `_registry`/`_pool` as per-session
+state. It's reference-counted instead: the first session in builds the shared
+`CMPool`/registry and the last session out tears it down (`_lifespan_lock` +
+`_active_sessions` in `server.py`); a failed startup resets the globals so a
+later session retries rather than reusing a broken pool. Getting this wrong
+previously crashed sessions in production — one session's teardown closed the
+httpx clients a different, still-active session was using mid-request
+(`AssertionError: Client not initialised`). For stdio there is exactly one
+session per process, so this is a plain start/stop either way. See
+`tests/unit/test_server_lifespan.py` for the regression coverage.
+
 ---
 
 ## Code structure

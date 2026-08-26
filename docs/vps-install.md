@@ -564,6 +564,7 @@ to see the service URLs auto-discovery will use.
 |---|---|
 | `cdp-mcp.service` exits 0 right after `cdp_mcp.ready` ("Deactivated successfully") | Missing `MCP_TRANSPORT=streamable-http` on the unit → defaults to stdio → reads EOF on `/dev/null` stdin and exits cleanly. Add the env var (§5) and `systemctl restart cdp-mcp`. |
 | `Connection refused on 127.0.0.1:8000` | Unit not running or crashed — `systemctl status cdp-mcp`, `journalctl -u cdp-mcp`. |
+| `AssertionError: Client not initialised. Call connect() or use async with.` / `Session ... crashed` / `BrokenResourceError`, usually right after a `cm_pool.stop` line | Fixed in `c4d43fd` (2026-08-26) — concurrent MCP sessions (a client reconnect after a network blip, a client restart, multiple windows on the same endpoint) raced to build/tear down the shared `CMPool`. If you see this, `git log -1` on the deployed checkout: anything before `c4d43fd` needs `git pull` + `systemctl restart cdp-mcp`. See the "Concurrent sessions share one CMPool" note in `CLAUDE.md`. |
 | `401 Unauthorized` / `WWW-Authenticate: Bearer` from every request | `MCP_AUTH_TOKEN` is set on the unit but the client isn't sending `Authorization: Bearer <token>` (or the wrong token). Check the journal for `cdp_mcp.auth_enabled`; add the header to the client config (§6). |
 | `[Errno 8] nodename nor servname` | Used `socks5://` — switch to `socks5h://` (remote DNS). |
 | `Connection refused on 127.0.0.1:1080` | autossh tunnel down — `systemctl status cdp-mcp-autossh`, check `IdentityFile`/known_hosts. |
