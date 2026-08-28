@@ -220,6 +220,76 @@ async def test_list_apps_empty_returns_empty_list(client):
     assert result == []
 
 
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_apps_sends_limit_and_time_range_params(client):
+    route = respx.get(f"{BASE}/ws/v1/cluster/apps").mock(
+        return_value=httpx.Response(200, json={"apps": {"app": []}})
+    )
+    await client.list_apps(
+        started_after="2024-01-01T00:00:00+00:00",
+        started_before="2024-01-02T00:00:00+00:00",
+        finished_after="2024-01-01T01:00:00+00:00",
+        finished_before="2024-01-02T01:00:00+00:00",
+        limit=7,
+    )
+    request = route.calls[0].request
+    params = dict(httpx.QueryParams(request.url.query))
+    assert params["startedTimeBegin"] == "1704067200000"
+    assert params["startedTimeEnd"] == "1704153600000"
+    assert params["finishedTimeBegin"] == "1704070800000"
+    assert params["finishedTimeEnd"] == "1704157200000"
+    assert params["limit"] == "7"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_apps_filters_by_min_duration(client):
+    apps = [
+        {"id": "app_short", "name": "Short", "user": "u", "queue": "q",
+         "state": "FINISHED", "finalStatus": "SUCCEEDED", "progress": 100,
+         "elapsedTime": 5000, "startedTime": 1},
+        {"id": "app_long", "name": "Long", "user": "u", "queue": "q",
+         "state": "FINISHED", "finalStatus": "SUCCEEDED", "progress": 100,
+         "elapsedTime": 120000, "startedTime": 2},
+    ]
+    respx.get(f"{BASE}/ws/v1/cluster/apps").mock(
+        return_value=httpx.Response(200, json={"apps": {"app": apps}})
+    )
+    result = await client.list_apps(min_duration_secs=60)
+    assert [a["app_id"] for a in result] == ["app_long"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_apps_filters_by_max_duration(client):
+    apps = [
+        {"id": "app_short", "name": "Short", "user": "u", "queue": "q",
+         "state": "FINISHED", "finalStatus": "SUCCEEDED", "progress": 100,
+         "elapsedTime": 5000, "startedTime": 1},
+        {"id": "app_long", "name": "Long", "user": "u", "queue": "q",
+         "state": "FINISHED", "finalStatus": "SUCCEEDED", "progress": 100,
+         "elapsedTime": 120000, "startedTime": 2},
+    ]
+    respx.get(f"{BASE}/ws/v1/cluster/apps").mock(
+        return_value=httpx.Response(200, json={"apps": {"app": apps}})
+    )
+    result = await client.list_apps(max_duration_secs=60)
+    assert [a["app_id"] for a in result] == ["app_short"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_apps_duration_filter_omits_server_side_limit(client):
+    route = respx.get(f"{BASE}/ws/v1/cluster/apps").mock(
+        return_value=httpx.Response(200, json={"apps": {"app": []}})
+    )
+    await client.list_apps(min_duration_secs=60, limit=5)
+    request = route.calls[0].request
+    params = dict(httpx.QueryParams(request.url.query))
+    assert "limit" not in params
+
+
 # ── get_queue ─────────────────────────────────────────────────────────────────
 
 SCHEDULER_RESPONSE = {

@@ -1304,17 +1304,29 @@ async def list_yarn_apps(
     state: str | None = None,
     queue: str | None = None,
     user: str | None = None,
+    started_after: str | None = None,
+    started_before: str | None = None,
+    finished_after: str | None = None,
+    finished_before: str | None = None,
+    min_duration_secs: int | None = None,
+    max_duration_secs: int | None = None,
     limit: int = 20,
 ) -> str:
     """
     List recent YARN applications on a cluster.
 
     Args:
-      cluster_name: Cluster name.
-      state:        Filter by state (e.g. RUNNING, FINISHED, FAILED, KILLED).
-      queue:        Filter by queue name.
-      user:         Filter by submitting user.
-      limit:        Maximum applications to return (default 20).
+      cluster_name:       Cluster name.
+      state:              Filter by state (e.g. RUNNING, FINISHED, FAILED, KILLED).
+      queue:              Filter by queue name.
+      user:               Filter by submitting user.
+      started_after:      ISO 8601 time -- only apps started at/after this time.
+      started_before:     ISO 8601 time -- only apps started at/before this time.
+      finished_after:     ISO 8601 time -- only apps finished at/after this time.
+      finished_before:    ISO 8601 time -- only apps finished at/before this time.
+      min_duration_secs:  Only apps whose elapsed time is >= this many seconds.
+      max_duration_secs:  Only apps whose elapsed time is <= this many seconds.
+      limit:              Maximum applications to return (default 20).
     """
     endpoints = _pool.get_endpoints(cluster_name)
     if not endpoints.yarn_rm_url:
@@ -1330,7 +1342,18 @@ async def list_yarn_apps(
     try:
         client = _pool.get_yarn_client(cluster_name)
         return _dump(
-            await client.list_apps(state=state, queue=queue, user=user, limit=limit)
+            await client.list_apps(
+                state=state,
+                queue=queue,
+                user=user,
+                started_after=started_after,
+                started_before=started_before,
+                finished_after=finished_after,
+                finished_before=finished_before,
+                min_duration_secs=min_duration_secs,
+                max_duration_secs=max_duration_secs,
+                limit=limit,
+            )
         )
     except SpnegoRequiredError:
         _pool.mark_spnego_required(cluster_name, "yarn")

@@ -3,6 +3,7 @@ yarn_client.py — Async client for YARN ResourceManager REST API.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -148,11 +149,22 @@ class YarnClient:
             )
         return result
 
+    @staticmethod
+    def _to_millis(iso_time: str) -> int:
+        dt = datetime.fromisoformat(iso_time.replace("Z", "+00:00"))
+        return int(dt.timestamp() * 1000)
+
     async def list_apps(
         self,
         state: str | None = None,
         queue: str | None = None,
         user: str | None = None,
+        started_after: str | None = None,
+        started_before: str | None = None,
+        finished_after: str | None = None,
+        finished_before: str | None = None,
+        min_duration_secs: int | None = None,
+        max_duration_secs: int | None = None,
         limit: int = 20,
     ) -> list[dict]:
         """List YARN applications (compact, no diagnostics)."""
@@ -163,9 +175,35 @@ class YarnClient:
             params["queues"] = queue
         if user:
             params["user"] = user
+        if started_after:
+            params["startedTimeBegin"] = self._to_millis(started_after)
+        if started_before:
+            params["startedTimeEnd"] = self._to_millis(started_before)
+        if finished_after:
+            params["finishedTimeBegin"] = self._to_millis(finished_after)
+        if finished_before:
+            params["finishedTimeEnd"] = self._to_millis(finished_before)
+
+        # YARN has no server-side duration filter -- elapsedTime is filtered
+        # client-side below. Sending `limit` here would truncate the result
+        # set before duration filtering has a chance to run, so it's only
+        # sent to YARN when no duration filter is in play.
+        duration_filter = min_duration_secs is not None or max_duration_secs is not None
+        if not duration_filter:
+            params["limit"] = limit
 
         data = await self._get("/ws/v1/cluster/apps", params=params)
         apps = (data.get("apps") or {}).get("app", []) or []
+
+        if min_duration_secs is not None:
+            apps = [
+                a for a in apps if a.get("elapsedTime", 0) / 1000 >= min_duration_secs
+            ]
+        if max_duration_secs is not None:
+            apps = [
+                a for a in apps if a.get("elapsedTime", 0) / 1000 <= max_duration_secs
+            ]
+
         apps_sorted = sorted(
             apps, key=lambda a: a.get("startedTime", 0), reverse=True
         )
