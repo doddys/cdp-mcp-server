@@ -402,5 +402,59 @@ the service URLs auto-discovery will use.
 - [ ] `cdp-mcp.service` enabled with `MCP_TRANSPORT=streamable-http`, `MCP_HOST=127.0.0.1`; no `KRB5CCNAME`, no autossh `Requires=` (§4).
 - [ ] (Recommended) `MCP_AUTH_TOKEN` set on the unit; client sends `Authorization: Bearer <token>` (§5).
 - [ ] `curl http://127.0.0.1:8000/mcp` returns an HTTP response (listener up) (§7).
+
+---
+
+## 10. Updating a deployment (pull latest + restart)
+
+Once installed (§1–§4), shipping a new commit to `main` is pull + restart —
+no reinstall unless dependencies changed.
+
+```bash
+sudo -u cdp -i
+cd /opt/cdp-mcp-server
+
+# 1. See what's coming before touching anything running
+git fetch --all
+git log --oneline HEAD..origin/main
+git diff --stat HEAD origin/main -- pyproject.toml uv.lock   # empty output = no dep changes
+
+# 2. Pull (fast-forward only — refuses rather than merges/rebases if the
+#    tree has diverged; investigate before forcing anything)
+git pull --ff-only
+
+# 3. Only if step 1 showed pyproject.toml/uv.lock changed:
+uv sync --extra dev
+
+exit   # back to your own login user
+```
+
+```bash
+# 4. Restart and verify
+sudo systemctl restart cdp-mcp.service
+sudo systemctl status cdp-mcp.service --no-pager -l
+sudo journalctl -u cdp-mcp.service --since "1 minute ago" --no-pager
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8000/mcp   # any HTTP code = listener is up
+```
+
+Notes:
+- The repo working copy is owned by the `cdp` service account — run `git`
+  (and `uv sync`) as that user (`sudo -u cdp -i`), not your own login user, or
+  you'll hit `fatal: detected dubious ownership` and can leave files the
+  service can't write mixed into the tree.
+- `Restart=on-failure` on the unit does **not** cover this case: a stale
+  process still serving old code isn't a failure state, so `systemctl
+  restart` is required explicitly after every pull.
+- Skip `uv sync` when `pyproject.toml`/`uv.lock` are unchanged — restarting
+  the unit is enough to pick up plain source changes.
+- If you enabled the optional autossh tunnel (§6), a `cdp-mcp.service`
+  restart doesn't touch it — restart `cdp-mcp-autossh.service` separately if
+  needed.
+- If something else proxies in front of `cdp-mcp.service` (reverse proxy,
+  request-mediation sidecar, etc.), confirm it re-established its connection
+  after the restart — check its own logs/journal for successful requests
+  against the new process, since a dead upstream connection may otherwise
+  surface as client-visible errors before the sidecar's own health check
+  notices.
 - [ ] (If internal-only) §6 autossh tunnel up + `ALL_PROXY=socks5h://` set (§6).
 - [ ] Client reaches the loopback endpoint over an SSH tunnel (§5A).
