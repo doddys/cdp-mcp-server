@@ -44,14 +44,68 @@ async def test_get_cluster_security_info(client):
 @respx.mock
 @pytest.mark.asyncio
 async def test_get_host_metrics(client):
+    points = [{"timestamp": f"t{i}", "value": i} for i in range(10)]
     route = respx.post(f"{BASE}/timeseries").mock(
-        return_value=httpx.Response(200, json={"items": [{"metric": "cpu_percent"}]})
+        return_value=httpx.Response(
+            200,
+            json={
+                "items": [
+                    {"timeSeries": [{"metadata": {"metricName": "cpu_percent"}, "data": points}]}
+                ]
+            },
+        )
     )
     result = await client.get_host_metrics("host1.example.com", ["cpu_percent"])
-    assert result["items"] == [{"metric": "cpu_percent"}]
+    assert result["items"][0]["timeSeries"][0]["data"] == points
     assert result["time_range_defaulted"] is True
+    assert result["truncated"] is False
+    assert "_truncated" not in result
     sent_body = route.calls[0].request.content
     assert b"host1.example.com" in sent_body
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_host_metrics_caps_large_series(client):
+    points = [{"timestamp": f"t{i}", "value": i} for i in range(5000)]
+    respx.post(f"{BASE}/timeseries").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "items": [
+                    {"timeSeries": [{"metadata": {"metricName": "cpu_percent"}, "data": points}]}
+                ]
+            },
+        )
+    )
+    result = await client.get_host_metrics("host1.example.com", ["cpu_percent"])
+    ts = result["items"][0]["timeSeries"][0]
+    assert len(ts["data"]) == ClouderaManagerClient.MAX_TIMESERIES_POINTS
+    assert ts["data"] == points[-ClouderaManagerClient.MAX_TIMESERIES_POINTS :]
+    assert ts["data_truncated"] is True
+    assert ts["data_points_available"] == 5000
+    assert result["truncated"] is True
+    assert result["_truncated"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_service_metrics_caps_large_series(client):
+    points = [{"timestamp": f"t{i}", "value": i} for i in range(5000)]
+    respx.post(f"{BASE}/timeseries").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "items": [
+                    {"timeSeries": [{"metadata": {"metricName": "cpu_percent"}, "data": points}]}
+                ]
+            },
+        )
+    )
+    result = await client.get_service_metrics("My Cluster", "yarn", ["cpu_percent"])
+    ts = result["items"][0]["timeSeries"][0]
+    assert len(ts["data"]) == ClouderaManagerClient.MAX_TIMESERIES_POINTS
+    assert result["truncated"] is True
 
 
 @respx.mock

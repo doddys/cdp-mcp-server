@@ -843,6 +843,35 @@ class ClouderaManagerClient:
 
     # ── Metrics ───────────────────────────────────────────────────────────────
 
+    # CM's /timeseries has no server-side point cap, and a wide range times
+    # many metric_names can return a huge number of raw {timestamp, value}
+    # points per series -- confirmed live: an uncapped request produced a
+    # ~17MB response that took long enough for a downstream MCP client to
+    # give up and drop the connection entirely. Each series is capped to its
+    # most recent MAX_TIMESERIES_POINTS points client-side, same envelope
+    # style as get_alerts/get_replication_*.
+    MAX_TIMESERIES_POINTS = 2000
+
+    @classmethod
+    def _cap_timeseries_items(cls, items: list[dict]) -> tuple[list[dict], bool]:
+        truncated = False
+        capped_items = []
+        for item in items:
+            capped_series = []
+            for ts in item.get("timeSeries") or []:
+                points = ts.get("data") or []
+                if len(points) > cls.MAX_TIMESERIES_POINTS:
+                    truncated = True
+                    ts = {
+                        **ts,
+                        "data": points[-cls.MAX_TIMESERIES_POINTS :],
+                        "data_truncated": True,
+                        "data_points_available": len(points),
+                    }
+                capped_series.append(ts)
+            capped_items.append({**item, "timeSeries": capped_series})
+        return capped_items, truncated
+
     async def get_service_metrics(
         self,
         cluster_name: str,
@@ -865,11 +894,20 @@ class ClouderaManagerClient:
             "to": end_time,
         }
         data = await self._post("/timeseries", json=body)
-        return {
-            "items": data.get("items", []),
+        items, truncated = self._cap_timeseries_items(data.get("items", []))
+        result: dict[str, Any] = {
+            "items": items,
             "time_range_defaulted": time_range_defaulted,
             "effective_range": {"start": start_time, "end": end_time},
+            "truncated": truncated,
         }
+        if truncated:
+            result["_truncated"] = [
+                f"One or more series exceeded {self.MAX_TIMESERIES_POINTS} points and "
+                "were capped to the most recent points -- narrow start_time/end_time "
+                "or reduce metric_names for the full series."
+            ]
+        return result
 
     async def get_host_metrics(
         self,
@@ -888,11 +926,20 @@ class ClouderaManagerClient:
             "to": end_time,
         }
         data = await self._post("/timeseries", json=body)
-        return {
-            "items": data.get("items", []),
+        items, truncated = self._cap_timeseries_items(data.get("items", []))
+        result: dict[str, Any] = {
+            "items": items,
             "time_range_defaulted": time_range_defaulted,
             "effective_range": {"start": start_time, "end": end_time},
+            "truncated": truncated,
         }
+        if truncated:
+            result["_truncated"] = [
+                f"One or more series exceeded {self.MAX_TIMESERIES_POINTS} points and "
+                "were capped to the most recent points -- narrow start_time/end_time "
+                "or reduce metric_names for the full series."
+            ]
+        return result
 
     async def list_available_metrics(self, name_contains: str | None = None) -> list[dict]:
         """

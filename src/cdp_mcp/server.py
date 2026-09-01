@@ -361,10 +361,15 @@ async def get_service_metrics(
 ) -> str:
     """
     Query time-series metrics for a service via the CM tsquery API.
-    Response: {"items": [...], "time_range_defaulted": bool, "effective_range": {...}}.
+    Response: {"items": [...], "time_range_defaulted": bool, "effective_range": {...},
+    "truncated": bool}.
     "time_range_defaulted": true means start_time/end_time were omitted and
     silently defaulted to the last hour -- check "effective_range" for what
     was actually queried before assuming this covers a longer period.
+    "truncated": true means one or more series exceeded the per-series point
+    cap and were capped to their most recent points -- narrow the time range
+    or metric_names for the full series (a wide range x many metrics can
+    otherwise return a multi-MB payload that breaks the MCP connection).
 
     Args:
       cluster_name: Cluster name.
@@ -402,9 +407,14 @@ async def get_host_metrics(
     Query time-series metrics for a single host (CPU, memory, disk, network)
     via the CM tsquery API. Use list_available_metrics() to discover metric
     names first if unsure what to pass.
-    Response: {"items": [...], "time_range_defaulted": bool, "effective_range": {...}}.
+    Response: {"items": [...], "time_range_defaulted": bool, "effective_range": {...},
+    "truncated": bool}.
     "time_range_defaulted": true means start_time/end_time were omitted and
     silently defaulted to the last hour.
+    "truncated": true means one or more series exceeded the per-series point
+    cap and were capped to their most recent points -- narrow the time range
+    or metric_names for the full series (a wide range x many metrics can
+    otherwise return a multi-MB payload that breaks the MCP connection).
 
     Args:
       cluster_name: Cluster the host belongs to (used to pick the right CM instance).
