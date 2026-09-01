@@ -1327,6 +1327,13 @@ async def list_yarn_apps(
       min_duration_secs:  Only apps whose elapsed time is >= this many seconds.
       max_duration_secs:  Only apps whose elapsed time is <= this many seconds.
       limit:              Maximum applications to return (default 20).
+
+    Time-range and duration filters are enforced client-side regardless of
+    whether the RM honors them server-side (some RM versions/configs
+    silently ignore startedTimeBegin/End and finishedTimeBegin/End and
+    return their full cached app list) -- so results are always correctly
+    bounded, though a wide/unbounded range can still only surface whatever
+    YARN currently retains in its completed-applications cache.
     """
     endpoints = _pool.get_endpoints(cluster_name)
     if not endpoints.yarn_rm_url:

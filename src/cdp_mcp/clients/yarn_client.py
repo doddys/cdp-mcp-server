@@ -175,26 +175,60 @@ class YarnClient:
             params["queues"] = queue
         if user:
             params["user"] = user
-        if started_after:
-            params["startedTimeBegin"] = self._to_millis(started_after)
-        if started_before:
-            params["startedTimeEnd"] = self._to_millis(started_before)
-        if finished_after:
-            params["finishedTimeBegin"] = self._to_millis(finished_after)
-        if finished_before:
-            params["finishedTimeEnd"] = self._to_millis(finished_before)
+        started_after_ms = self._to_millis(started_after) if started_after else None
+        started_before_ms = self._to_millis(started_before) if started_before else None
+        finished_after_ms = self._to_millis(finished_after) if finished_after else None
+        finished_before_ms = self._to_millis(finished_before) if finished_before else None
+        if started_after_ms is not None:
+            params["startedTimeBegin"] = started_after_ms
+        if started_before_ms is not None:
+            params["startedTimeEnd"] = started_before_ms
+        if finished_after_ms is not None:
+            params["finishedTimeBegin"] = finished_after_ms
+        if finished_before_ms is not None:
+            params["finishedTimeEnd"] = finished_before_ms
 
-        # YARN has no server-side duration filter -- elapsedTime is filtered
-        # client-side below. Sending `limit` here would truncate the result
-        # set before duration filtering has a chance to run, so it's only
-        # sent to YARN when no duration filter is in play.
-        duration_filter = min_duration_secs is not None or max_duration_secs is not None
-        if not duration_filter:
+        # Sent server-side as a hint, but not trusted: some RM versions/configs
+        # silently ignore startedTimeBegin/End and finishedTimeBegin/End and
+        # return their whole cached app list regardless (confirmed live --
+        # requests for non-overlapping weeks returned identical results
+        # spanning the full multi-month range). So time bounds are always
+        # re-applied client-side below, same as duration (which YARN has no
+        # server-side filter for at all). Sending `limit` here would truncate
+        # the result set before that filtering has a chance to run, so it's
+        # only sent to YARN when no client-side filter is in play.
+        client_side_filter = (
+            min_duration_secs is not None
+            or max_duration_secs is not None
+            or started_after_ms is not None
+            or started_before_ms is not None
+            or finished_after_ms is not None
+            or finished_before_ms is not None
+        )
+        if not client_side_filter:
             params["limit"] = limit
 
         data = await self._get("/ws/v1/cluster/apps", params=params)
         apps = (data.get("apps") or {}).get("app", []) or []
 
+        if started_after_ms is not None:
+            apps = [a for a in apps if a.get("startedTime", 0) >= started_after_ms]
+        if started_before_ms is not None:
+            apps = [a for a in apps if a.get("startedTime", 0) <= started_before_ms]
+        if finished_after_ms is not None:
+            apps = [
+                a
+                for a in apps
+                if a.get("finishedTime", 0) > 0
+                and a.get("finishedTime", 0) >= finished_after_ms
+            ]
+        if finished_before_ms is not None:
+            apps = [
+                a
+                for a in apps
+                if a.get("finishedTime", 0) > 0
+                and a.get("finishedTime", 0) <= finished_before_ms
+            ]
         if min_duration_secs is not None:
             apps = [
                 a for a in apps if a.get("elapsedTime", 0) / 1000 >= min_duration_secs

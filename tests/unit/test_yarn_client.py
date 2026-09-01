@@ -222,7 +222,7 @@ async def test_list_apps_empty_returns_empty_list(client):
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_list_apps_sends_limit_and_time_range_params(client):
+async def test_list_apps_sends_time_range_params_but_omits_limit(client):
     route = respx.get(f"{BASE}/ws/v1/cluster/apps").mock(
         return_value=httpx.Response(200, json={"apps": {"app": []}})
     )
@@ -239,7 +239,55 @@ async def test_list_apps_sends_limit_and_time_range_params(client):
     assert params["startedTimeEnd"] == "1704153600000"
     assert params["finishedTimeBegin"] == "1704070800000"
     assert params["finishedTimeEnd"] == "1704157200000"
-    assert params["limit"] == "7"
+    # limit is withheld -- client-side time-range filtering must see the
+    # full result set before truncation, since RM's own filters aren't trusted.
+    assert "limit" not in params
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_apps_reapplies_started_time_filter_client_side(client):
+    """RM has been observed ignoring startedTimeBegin/End and returning its
+    whole cached app list regardless -- non-overlapping week-long requests
+    returned identical, full-range results live. So even though the bounds
+    are sent server-side, they must also be enforced client-side."""
+    apps = [
+        {"id": "app_in_range", "name": "InRange", "user": "u", "queue": "q",
+         "state": "FINISHED", "finalStatus": "SUCCEEDED", "progress": 100,
+         "elapsedTime": 0, "startedTime": 1704067200000 + 1000},
+        {"id": "app_before_range", "name": "Before", "user": "u", "queue": "q",
+         "state": "FINISHED", "finalStatus": "SUCCEEDED", "progress": 100,
+         "elapsedTime": 0, "startedTime": 1704067200000 - 1000},
+        {"id": "app_after_range", "name": "After", "user": "u", "queue": "q",
+         "state": "FINISHED", "finalStatus": "SUCCEEDED", "progress": 100,
+         "elapsedTime": 0, "startedTime": 1704153600000 + 1000},
+    ]
+    respx.get(f"{BASE}/ws/v1/cluster/apps").mock(
+        return_value=httpx.Response(200, json={"apps": {"app": apps}})
+    )
+    result = await client.list_apps(
+        started_after="2024-01-01T00:00:00+00:00",
+        started_before="2024-01-02T00:00:00+00:00",
+    )
+    assert [a["app_id"] for a in result] == ["app_in_range"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_list_apps_finished_before_excludes_still_running_apps(client):
+    apps = [
+        {"id": "app_finished", "name": "Finished", "user": "u", "queue": "q",
+         "state": "FINISHED", "finalStatus": "SUCCEEDED", "progress": 100,
+         "elapsedTime": 0, "startedTime": 1, "finishedTime": 1704067200000},
+        {"id": "app_running", "name": "Running", "user": "u", "queue": "q",
+         "state": "RUNNING", "finalStatus": "UNDEFINED", "progress": 50,
+         "elapsedTime": 0, "startedTime": 1, "finishedTime": 0},
+    ]
+    respx.get(f"{BASE}/ws/v1/cluster/apps").mock(
+        return_value=httpx.Response(200, json={"apps": {"app": apps}})
+    )
+    result = await client.list_apps(finished_before="2024-01-02T00:00:00+00:00")
+    assert [a["app_id"] for a in result] == ["app_finished"]
 
 
 @respx.mock
