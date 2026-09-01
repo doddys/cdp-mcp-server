@@ -859,6 +859,20 @@ class ClouderaManagerClient:
     MAX_TIMESERIES_POINTS = 2000
     SAMPLE_MODES = ("even", "recent")
 
+    # CM embeds a full aggregateStatistics block (min/max/mean/stdDev/count/
+    # sampleTime/minTime/maxTime) in every point once it auto-rolls-up a wide
+    # range to a coarser granularity (e.g. TEN_MINUTELY) -- confirmed live:
+    # ~330 bytes/point vs ~65 for timestamp+value+type, the dominant size
+    # driver in real report-generator traffic (4-8MB responses that never
+    # even hit MAX_TIMESERIES_POINTS, because the point *count* was fine --
+    # the point *payload* wasn't). Only timestamp/value/type are useful for
+    # the trend/troubleshooting use cases these tools serve.
+    _POINT_FIELDS = ("timestamp", "value", "type")
+
+    @classmethod
+    def _slim_point(cls, point: dict) -> dict:
+        return {k: v for k, v in point.items() if k in cls._POINT_FIELDS}
+
     @staticmethod
     def _downsample_evenly(points: list, max_points: int) -> list:
         n = len(points)
@@ -885,7 +899,7 @@ class ClouderaManagerClient:
         for item in items:
             capped_series = []
             for ts in item.get("timeSeries") or []:
-                points = ts.get("data") or []
+                points = [cls._slim_point(p) for p in (ts.get("data") or [])]
                 if len(points) > cls.MAX_TIMESERIES_POINTS:
                     truncated = True
                     if sample_mode == "recent":
@@ -899,6 +913,8 @@ class ClouderaManagerClient:
                         "data_truncated": sample_mode == "recent",
                         "data_points_available": len(points),
                     }
+                else:
+                    ts = {**ts, "data": points}
                 capped_series.append(ts)
             capped_items.append({**item, "timeSeries": capped_series})
         return capped_items, truncated

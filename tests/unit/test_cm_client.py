@@ -66,6 +66,48 @@ async def test_get_host_metrics(client):
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_get_host_metrics_strips_aggregate_statistics(client):
+    """CM embeds a full aggregateStatistics block per point once it
+    auto-rolls-up a wide range -- confirmed live as the dominant size driver
+    in real report-generator traffic (multi-MB responses that never even hit
+    the point cap). Only timestamp/value/type should survive, on every
+    series regardless of whether it was truncated."""
+    point = {
+        "timestamp": "2026-08-28T17:00:00.000Z",
+        "value": 1.33,
+        "type": "SAMPLE",
+        "aggregateStatistics": {
+            "sampleTime": "2026-08-28T16:59:53.000Z",
+            "sampleValue": 1.3,
+            "count": 10,
+            "min": 1.2,
+            "max": 1.6,
+            "mean": 1.33,
+            "stdDev": 0.15,
+        },
+    }
+    respx.post(f"{BASE}/timeseries").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "items": [
+                    {"timeSeries": [{"metadata": {"metricName": "cpu_percent"}, "data": [point]}]}
+                ]
+            },
+        )
+    )
+    result = await client.get_host_metrics("host1.example.com", ["cpu_percent"])
+    slimmed = result["items"][0]["timeSeries"][0]["data"][0]
+    assert slimmed == {
+        "timestamp": "2026-08-28T17:00:00.000Z",
+        "value": 1.33,
+        "type": "SAMPLE",
+    }
+    assert result["truncated"] is False
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_get_host_metrics_downsamples_evenly_by_default(client):
     points = [{"timestamp": f"t{i}", "value": i} for i in range(5000)]
     respx.post(f"{BASE}/timeseries").mock(
