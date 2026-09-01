@@ -167,18 +167,35 @@ response can grow large must bound itself, in this order of preference:
    `maxCommands`, `maxResults`/`resultOffset`, `view=summary`, `limit`) over
    fetching everything and trimming in Python — less bandwidth, correct
    semantics. `view=summary` often carries the scalar counters at ~10–40×
-   smaller than `full`; use `full` only for per-record detail.
+   smaller than `full`; use `full` only for per-record detail. Don't trust a
+   documented server-side filter blindly, though — `list_yarn_apps`'
+   `startedTimeBegin`/`startedTimeEnd` are real YARN RM API params, but were
+   observed live returning the RM's full cached app list regardless of the
+   requested bounds; time-range and duration filters there are always
+   re-applied client-side as a correctness backstop, not just for bounding.
 2. **Client-side pagination where the server has no time filter.** When CM
    has no `from`/`to` (e.g. `/replications/{id}/history`), page by offset with
    a client-side cutoff on each record's timestamp (history is newest-first).
 3. **Aggregation for wide windows.** For a report spanning a wide time range
    (e.g. one month), aggregate counters page-by-page and return totals, never
    accumulate raw records — `get_replication_metrics` is the model.
+4. **Client-side downsampling for continuous/point-series data.** Some
+   payloads (CM `/timeseries`) aren't record lists that can be paginated or
+   aggregated into totals — they're continuous series where the caller wants
+   the *shape*, not a subset. `get_service_metrics`/`get_host_metrics` cap
+   each series to `ClouderaManagerClient.MAX_TIMESERIES_POINTS` (2000) and
+   offer a `sample_mode` so the caller picks the trade-off: `"even"` spreads
+   samples across the full requested range (trend queries), `"recent"` keeps
+   full resolution for only the most recent slice (incident response).
+   Confirmed live: an uncapped `get_host_metrics` call returned ~17MB, slow
+   enough end-to-end (through the deployment's masking proxy) that the
+   downstream MCP client gave up and dropped the connection.
 
 Return a structured envelope (`{items, count, truncated, ...,
 effective_range}`) consistent with `get_alerts`/`get_audit_events`/
-`get_service_logs`/`get_replication_*`, so the caller can tell "nothing
-matched" from "we stopped looking". Never return a bare unbounded list.
+`get_service_logs`/`get_replication_*`/`get_service_metrics`/
+`get_host_metrics`, so the caller can tell "nothing matched" from "we
+stopped looking". Never return a bare unbounded list.
 
 ---
 

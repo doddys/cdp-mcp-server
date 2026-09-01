@@ -11,8 +11,8 @@
 | `get_role_status` | Detailed status for a single role instance |
 | `get_service_logs` | Extract service logs with time range filtering |
 | `get_alerts` | Get cluster alerts and events — paginates internally to cover the full requested time range, see note below |
-| `get_service_metrics` | Time-series metrics via tsquery |
-| `get_host_metrics` | Time-series metrics for a single host (CPU, memory, disk, network) |
+| `get_service_metrics` | Time-series metrics via tsquery — series over 2000 points are capped client-side, see `sample_mode` note below |
+| `get_host_metrics` | Time-series metrics for a single host (CPU, memory, disk, network) — series over 2000 points are capped client-side, see `sample_mode` note below |
 | `list_available_metrics` | Discover metric names/descriptions for use with `get_service_metrics`/`get_host_metrics` — pass `cluster_name` in multi-CM registries to scope to the right instance |
 | `get_config` | Read service configuration |
 | `update_config` | Write service configuration |
@@ -64,6 +64,35 @@
       exist). Raise the cap or narrow the range. `get_replication_history` also
       returns `total_in_range` (true match count, independent of `limit`).
 
+!!! note "`get_service_metrics` / `get_host_metrics` — point cap and `sample_mode`"
+    CM's `/timeseries` has no server-side point cap — a wide range × several
+    `metric_names` can return tens of thousands of raw points and a multi-MB
+    response large enough to break the MCP connection. Every series is capped
+    client-side to **2000 points**, in one of two caller-selectable ways via
+    `sample_mode`:
+
+    - `"even"` (default) — evenly spaced samples spanning the **full**
+      requested range, first and last sample always kept. Use this for
+      trend/capacity queries over a wide window (e.g. a monthly report) —
+      resolution drops, but the whole period is represented. For 2000 points
+      over 30 days, expect roughly one sample every ~22 minutes regardless of
+      the metric's native sampling rate.
+    - `"recent"` — full native-resolution samples for only the **most
+      recent** slice; older data is dropped entirely. Use this for "what's
+      happening right now" incident response, not for period-spanning
+      reports.
+
+    The cap is **per series**, not per response — requesting many
+    `metric_names` (or querying a service with many role instances) multiplies
+    total series count, so group related metrics into a few calls rather than
+    one call with a huge `metric_names` list.
+
+    Check before treating a series as complete: top-level `truncated` (bool)
+    and `_truncated` (human-readable note) are set when any series was capped;
+    per-series, capped entries carry `data_downsampled` (true under `"even"`),
+    `data_truncated` (true under `"recent"`), and `data_points_available` (the
+    original, pre-cap point count).
+
 ## Registry Tools
 
 | Tool | Description |
@@ -80,7 +109,7 @@
 | Tool | Description |
 |---|---|
 | `get_yarn_app` | Application details, diagnostics, resource usage and timing |
-| `list_yarn_apps` | List applications filtered by state / queue / user |
+| `list_yarn_apps` | List applications filtered by state / queue / user / started / finished time / duration — time-range and duration filters are always re-applied client-side, since the ResourceManager doesn't reliably honor `startedTimeBegin`/`startedTimeEnd`/`finishedTimeBegin`/`finishedTimeEnd` on every RM version (confirmed live: non-overlapping week-long requests returned identical, unfiltered results) |
 | `get_yarn_queue` | Scheduler queue capacity and active/pending applications |
 
 ## Spark History Server Tools
@@ -139,6 +168,20 @@
 3. If you can't enable SPNEGO yet, use `list_impala_queries` /
    `get_service_metrics` / `get_service_logs` (all CM-API-based, no SPNEGO
    needed) for equivalent visibility where possible.
+
+### Metrics — monthly report / trend over a period?
+
+1. `get_service_metrics` / `get_host_metrics` with `start_time`/`end_time`
+   spanning the full period and **`sample_mode="even"`** (pass it explicitly
+   — don't rely on the default in case it changes) → evenly spaced samples
+   across the whole range, suitable for a trend chart.
+2. Check `truncated`/`data_points_available` on the response — if truncated,
+   footnote the chart with the effective resolution (2000 points over the
+   period) rather than presenting it as native-resolution data.
+3. To zoom into a specific incident found in the overview, issue a second,
+   narrow-range call for just that window (a day or a few hours) — native
+   resolution is unlikely to exceed the cap at that scale, so either
+   `sample_mode` works.
 
 ### Replication — monthly report / which jobs failed this month?
 
