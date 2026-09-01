@@ -847,13 +847,39 @@ class ClouderaManagerClient:
     # many metric_names can return a huge number of raw {timestamp, value}
     # points per series -- confirmed live: an uncapped request produced a
     # ~17MB response that took long enough for a downstream MCP client to
-    # give up and drop the connection entirely. Each series is capped to its
-    # most recent MAX_TIMESERIES_POINTS points client-side, same envelope
-    # style as get_alerts/get_replication_*.
+    # give up and drop the connection entirely. Each series exceeding
+    # MAX_TIMESERIES_POINTS is capped client-side, in one of two caller-
+    # selectable ways (sample_mode): "even" downsamples to an even spread
+    # across the full requested range (first/last sample kept, preserves
+    # trend shape end-to-end at reduced resolution -- the default, best for
+    # capacity/trend queries); "recent" keeps the most recent points at full
+    # native resolution, dropping everything older (best for "what's this
+    # host doing right now" incident response). Same envelope style as
+    # get_alerts/get_replication_*.
     MAX_TIMESERIES_POINTS = 2000
+    SAMPLE_MODES = ("even", "recent")
+
+    @staticmethod
+    def _downsample_evenly(points: list, max_points: int) -> list:
+        n = len(points)
+        if n <= max_points or max_points <= 1:
+            return points[:max_points] if max_points >= 1 else points
+        step = (n - 1) / (max_points - 1)
+        seen: set[int] = set()
+        result = []
+        for k in range(max_points):
+            idx = round(k * step)
+            if idx not in seen:
+                seen.add(idx)
+                result.append(points[idx])
+        return result
 
     @classmethod
-    def _cap_timeseries_items(cls, items: list[dict]) -> tuple[list[dict], bool]:
+    def _cap_timeseries_items(
+        cls, items: list[dict], sample_mode: str = "even"
+    ) -> tuple[list[dict], bool]:
+        if sample_mode not in cls.SAMPLE_MODES:
+            raise ValueError(f"sample_mode must be one of {cls.SAMPLE_MODES}, got {sample_mode!r}")
         truncated = False
         capped_items = []
         for item in items:
@@ -862,15 +888,37 @@ class ClouderaManagerClient:
                 points = ts.get("data") or []
                 if len(points) > cls.MAX_TIMESERIES_POINTS:
                     truncated = True
+                    if sample_mode == "recent":
+                        capped_points = points[-cls.MAX_TIMESERIES_POINTS :]
+                    else:
+                        capped_points = cls._downsample_evenly(points, cls.MAX_TIMESERIES_POINTS)
                     ts = {
                         **ts,
-                        "data": points[-cls.MAX_TIMESERIES_POINTS :],
-                        "data_truncated": True,
+                        "data": capped_points,
+                        "data_downsampled": sample_mode == "even",
+                        "data_truncated": sample_mode == "recent",
                         "data_points_available": len(points),
                     }
                 capped_series.append(ts)
             capped_items.append({**item, "timeSeries": capped_series})
         return capped_items, truncated
+
+    @classmethod
+    def _truncation_note(cls, sample_mode: str) -> str:
+        if sample_mode == "recent":
+            return (
+                f"One or more series exceeded {cls.MAX_TIMESERIES_POINTS} points and "
+                "were capped to the most recent points at full resolution -- pass "
+                "sample_mode='even' for a full-range trend, or narrow start_time/"
+                "end_time / reduce metric_names for full-resolution recent data."
+            )
+        return (
+            f"One or more series exceeded {cls.MAX_TIMESERIES_POINTS} points and "
+            "were downsampled to an even spread across the range (first/last "
+            "sample kept) -- pass sample_mode='recent' for full-resolution recent "
+            "data, or narrow start_time/end_time / reduce metric_names for full-"
+            "resolution data."
+        )
 
     async def get_service_metrics(
         self,
@@ -879,6 +927,7 @@ class ClouderaManagerClient:
         metric_names: list[str],
         start_time: str | None = None,
         end_time: str | None = None,
+        sample_mode: str = "even",
     ) -> dict[str, Any]:
         time_range_defaulted = start_time is None and end_time is None
         start_time, end_time = self._validate_time_range(start_time, end_time)
@@ -894,7 +943,7 @@ class ClouderaManagerClient:
             "to": end_time,
         }
         data = await self._post("/timeseries", json=body)
-        items, truncated = self._cap_timeseries_items(data.get("items", []))
+        items, truncated = self._cap_timeseries_items(data.get("items", []), sample_mode)
         result: dict[str, Any] = {
             "items": items,
             "time_range_defaulted": time_range_defaulted,
@@ -902,11 +951,7 @@ class ClouderaManagerClient:
             "truncated": truncated,
         }
         if truncated:
-            result["_truncated"] = [
-                f"One or more series exceeded {self.MAX_TIMESERIES_POINTS} points and "
-                "were capped to the most recent points -- narrow start_time/end_time "
-                "or reduce metric_names for the full series."
-            ]
+            result["_truncated"] = [self._truncation_note(sample_mode)]
         return result
 
     async def get_host_metrics(
@@ -915,6 +960,7 @@ class ClouderaManagerClient:
         metric_names: list[str],
         start_time: str | None = None,
         end_time: str | None = None,
+        sample_mode: str = "even",
     ) -> dict[str, Any]:
         time_range_defaulted = start_time is None and end_time is None
         start_time, end_time = self._validate_time_range(start_time, end_time)
@@ -926,7 +972,7 @@ class ClouderaManagerClient:
             "to": end_time,
         }
         data = await self._post("/timeseries", json=body)
-        items, truncated = self._cap_timeseries_items(data.get("items", []))
+        items, truncated = self._cap_timeseries_items(data.get("items", []), sample_mode)
         result: dict[str, Any] = {
             "items": items,
             "time_range_defaulted": time_range_defaulted,
@@ -934,11 +980,7 @@ class ClouderaManagerClient:
             "truncated": truncated,
         }
         if truncated:
-            result["_truncated"] = [
-                f"One or more series exceeded {self.MAX_TIMESERIES_POINTS} points and "
-                "were capped to the most recent points -- narrow start_time/end_time "
-                "or reduce metric_names for the full series."
-            ]
+            result["_truncated"] = [self._truncation_note(sample_mode)]
         return result
 
     async def list_available_metrics(self, name_contains: str | None = None) -> list[dict]:

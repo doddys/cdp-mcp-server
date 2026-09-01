@@ -66,7 +66,7 @@ async def test_get_host_metrics(client):
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_get_host_metrics_caps_large_series(client):
+async def test_get_host_metrics_downsamples_evenly_by_default(client):
     points = [{"timestamp": f"t{i}", "value": i} for i in range(5000)]
     respx.post(f"{BASE}/timeseries").mock(
         return_value=httpx.Response(
@@ -80,12 +80,51 @@ async def test_get_host_metrics_caps_large_series(client):
     )
     result = await client.get_host_metrics("host1.example.com", ["cpu_percent"])
     ts = result["items"][0]["timeSeries"][0]
-    assert len(ts["data"]) == ClouderaManagerClient.MAX_TIMESERIES_POINTS
-    assert ts["data"] == points[-ClouderaManagerClient.MAX_TIMESERIES_POINTS :]
-    assert ts["data_truncated"] is True
+    assert len(ts["data"]) <= ClouderaManagerClient.MAX_TIMESERIES_POINTS
+    # even spread across the whole range, not a trailing slice
+    assert ts["data"][0] == points[0]
+    assert ts["data"][-1] == points[-1]
+    assert ts["data_downsampled"] is True
+    assert "data_truncated" not in ts or ts["data_truncated"] is False
     assert ts["data_points_available"] == 5000
     assert result["truncated"] is True
     assert result["_truncated"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_host_metrics_recent_mode_keeps_trailing_slice(client):
+    points = [{"timestamp": f"t{i}", "value": i} for i in range(5000)]
+    respx.post(f"{BASE}/timeseries").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "items": [
+                    {"timeSeries": [{"metadata": {"metricName": "cpu_percent"}, "data": points}]}
+                ]
+            },
+        )
+    )
+    result = await client.get_host_metrics(
+        "host1.example.com", ["cpu_percent"], sample_mode="recent"
+    )
+    ts = result["items"][0]["timeSeries"][0]
+    assert ts["data"] == points[-ClouderaManagerClient.MAX_TIMESERIES_POINTS :]
+    assert ts["data_truncated"] is True
+    assert ts["data_downsampled"] is False
+    assert ts["data_points_available"] == 5000
+    assert result["truncated"] is True
+    assert "sample_mode='even'" in result["_truncated"][0]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_host_metrics_invalid_sample_mode_raises(client):
+    respx.post(f"{BASE}/timeseries").mock(
+        return_value=httpx.Response(200, json={"items": []})
+    )
+    with pytest.raises(ValueError):
+        await client.get_host_metrics("host1.example.com", ["cpu_percent"], sample_mode="bogus")
 
 
 @respx.mock
@@ -104,7 +143,7 @@ async def test_get_service_metrics_caps_large_series(client):
     )
     result = await client.get_service_metrics("My Cluster", "yarn", ["cpu_percent"])
     ts = result["items"][0]["timeSeries"][0]
-    assert len(ts["data"]) == ClouderaManagerClient.MAX_TIMESERIES_POINTS
+    assert len(ts["data"]) <= ClouderaManagerClient.MAX_TIMESERIES_POINTS
     assert result["truncated"] is True
 
 

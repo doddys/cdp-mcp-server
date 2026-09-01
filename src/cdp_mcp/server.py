@@ -358,6 +358,7 @@ async def get_service_metrics(
     metric_names: list[str],
     start_time: str | None = None,
     end_time: str | None = None,
+    sample_mode: str = "even",
 ) -> str:
     """
     Query time-series metrics for a service via the CM tsquery API.
@@ -367,8 +368,8 @@ async def get_service_metrics(
     silently defaulted to the last hour -- check "effective_range" for what
     was actually queried before assuming this covers a longer period.
     "truncated": true means one or more series exceeded the per-series point
-    cap and were capped to their most recent points -- narrow the time range
-    or metric_names for the full series (a wide range x many metrics can
+    cap and were resampled per sample_mode -- narrow the time range or
+    metric_names for full-resolution data (a wide range x many metrics can
     otherwise return a multi-MB payload that breaks the MCP connection).
 
     Args:
@@ -377,6 +378,12 @@ async def get_service_metrics(
       metric_names: List of metric names (e.g. ["cpu_user_rate", "mem_rss"]).
       start_time:   ISO 8601 start time.
       end_time:     ISO 8601 end time.
+      sample_mode:  How to cap a series over the point limit. "even" (default):
+                    evenly spaced samples across the full range (first/last
+                    kept) -- best for trend/capacity queries spanning a wide
+                    range. "recent": full-resolution samples for only the most
+                    recent slice, older data dropped -- best for "what's this
+                    host/service doing right now" incident response.
     """
     client = _pool.get_client_for_cluster(cluster_name)
     if client is None:
@@ -389,6 +396,7 @@ async def get_service_metrics(
                 metric_names,
                 start_time=start_time,
                 end_time=end_time,
+                sample_mode=sample_mode,
             )
         )
     except Exception as exc:
@@ -402,6 +410,7 @@ async def get_host_metrics(
     metric_names: list[str],
     start_time: str | None = None,
     end_time: str | None = None,
+    sample_mode: str = "even",
 ) -> str:
     """
     Query time-series metrics for a single host (CPU, memory, disk, network)
@@ -412,8 +421,8 @@ async def get_host_metrics(
     "time_range_defaulted": true means start_time/end_time were omitted and
     silently defaulted to the last hour.
     "truncated": true means one or more series exceeded the per-series point
-    cap and were capped to their most recent points -- narrow the time range
-    or metric_names for the full series (a wide range x many metrics can
+    cap and were resampled per sample_mode -- narrow the time range or
+    metric_names for full-resolution data (a wide range x many metrics can
     otherwise return a multi-MB payload that breaks the MCP connection).
 
     Args:
@@ -422,6 +431,12 @@ async def get_host_metrics(
       metric_names: List of metric names (e.g. ["cpu_percent", "physical_memory_used"]).
       start_time:   ISO 8601 start time.
       end_time:     ISO 8601 end time.
+      sample_mode:  How to cap a series over the point limit. "even" (default):
+                    evenly spaced samples across the full range (first/last
+                    kept) -- best for trend/capacity queries spanning a wide
+                    range. "recent": full-resolution samples for only the most
+                    recent slice, older data dropped -- best for "what's this
+                    host doing right now" incident response.
     """
     client = _pool.get_client_for_cluster(cluster_name)
     if client is None:
@@ -433,6 +448,7 @@ async def get_host_metrics(
                 metric_names,
                 start_time=start_time,
                 end_time=end_time,
+                sample_mode=sample_mode,
             )
         )
     except Exception as exc:
