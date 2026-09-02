@@ -189,7 +189,18 @@ response can grow large must bound itself, in this order of preference:
    full resolution for only the most recent slice (incident response).
    Confirmed live: an uncapped `get_host_metrics` call returned ~17MB, slow
    enough end-to-end (through the deployment's masking proxy) that the
-   downstream MCP client gave up and dropped the connection.
+   downstream MCP client gave up and dropped the connection. Every point is
+   also slimmed to `timestamp`/`value`/`type`, stripping CM's verbose
+   per-point `aggregateStatistics` block when present — but its presence is
+   CM's call, not this code's: CM auto-rolls a series to coarser granularity
+   as the queried period ages in its retention store (RAW → TEN_MINUTELY →
+   HOURLY → SIX_HOURLY → DAILY), and `aggregateStatistics` only accompanies
+   some of those levels. Confirmed live: re-querying the *same* nominal
+   weekly window days apart returned HOURLY+`aggregateStatistics` when fresh
+   vs. SIX_HOURLY with no `aggregateStatistics` once CM aged it further — a
+   difference in response shape/size between two runs of "the same period"
+   isn't necessarily this code changing behavior; check
+   `timeSeries[].metadata.rollupUsed` in the raw response first.
 
 Return a structured envelope (`{items, count, truncated, ...,
 effective_range}`) consistent with `get_alerts`/`get_audit_events`/

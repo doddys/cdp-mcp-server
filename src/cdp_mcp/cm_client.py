@@ -860,13 +860,26 @@ class ClouderaManagerClient:
     SAMPLE_MODES = ("even", "recent")
 
     # CM embeds a full aggregateStatistics block (min/max/mean/stdDev/count/
-    # sampleTime/minTime/maxTime) in every point once it auto-rolls-up a wide
-    # range to a coarser granularity (e.g. TEN_MINUTELY) -- confirmed live:
-    # ~330 bytes/point vs ~65 for timestamp+value+type, the dominant size
-    # driver in real report-generator traffic (4-8MB responses that never
-    # even hit MAX_TIMESERIES_POINTS, because the point *count* was fine --
-    # the point *payload* wasn't). Only timestamp/value/type are useful for
-    # the trend/troubleshooting use cases these tools serve.
+    # sampleTime/minTime/maxTime) in every point at some rollup granularities
+    # -- confirmed live: ~330 bytes/point vs ~65 for timestamp+value+type, the
+    # dominant size driver in real report-generator traffic (4-8MB responses
+    # that never even hit MAX_TIMESERIES_POINTS, because the point *count*
+    # was fine -- the point *payload* wasn't). Only timestamp/value/type are
+    # useful for the trend/troubleshooting use cases these tools serve.
+    #
+    # Whether aggregateStatistics is present at all is CM's call, not this
+    # code's: CM auto-rolls a series up through coarser granularities as the
+    # queried period ages in its retention store (RAW -> TEN_MINUTELY ->
+    # HOURLY -> SIX_HOURLY -> DAILY), and aggregateStatistics only accompanies
+    # some of those levels -- confirmed live: re-querying the *same* nominal
+    # weekly window days later, after CM had aged it further, returned
+    # SIX_HOURLY points with no aggregateStatistics at all, versus HOURLY+agg
+    # when the window was fresh. _slim_point is a no-op when the field was
+    # never there, so this is harmless either way, but don't read a
+    # difference in point shape/size between two runs "of the same period"
+    # as a regression here -- check what rollup CM actually used
+    # (`timeSeries[].metadata.rollupUsed` in the raw response) before
+    # assuming sample_mode or this slimming logic changed behavior.
     _POINT_FIELDS = ("timestamp", "value", "type")
 
     @classmethod
