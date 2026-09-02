@@ -190,20 +190,22 @@ response can grow large must bound itself, in this order of preference:
    Confirmed live: an uncapped `get_host_metrics` call returned ~17MB, slow
    enough end-to-end (through the deployment's masking proxy) that the
    downstream MCP client gave up and dropped the connection. Every point is
-   also slimmed to `timestamp`/`value`/`type`, stripping CM's verbose
-   per-point `aggregateStatistics` block **unconditionally** — every call,
-   every point, regardless of `sample_mode` and regardless of what rollup
-   granularity CM used. Its presence/absence in the response is *not* a
-   signal of CM's rollup level (RAW/TEN_MINUTELY/HOURLY/SIX_HOURLY/DAILY,
-   which CM auto-rolls a series through as the queried period ages in its
-   retention store) — it's always absent now. A same-nominal-window
+   also slimmed to `timestamp`/`value`/`type` by default, stripping CM's
+   verbose per-point `aggregateStatistics` block (min/max/mean/stdDev/count/
+   sampleTime/minTime/maxTime, ~5x the bytes of a bare point) — the dominant
+   size driver even *within* the point cap on real report-generator traffic.
+   This is opt-out, not silent data loss: pass `include_aggregate_stats=True`
+   when a caller specifically needs min/max/mean (e.g. a report chart).
+   `aggregateStatistics` presence/absence is never a signal of CM's own
+   rollup level (RAW/TEN_MINUTELY/HOURLY/SIX_HOURLY/DAILY, which CM ages a
+   series through independent of this parameter) — a same-nominal-window
    comparison that looked like "fresh=HOURLY+agg vs aged=SIX_HOURLY+no-agg"
    turned out to straddle this code's own deploy boundary (one fetch predated
-   the fix, one postdated it) rather than reflecting CM's rollup aging —
-   confirmed by comparing fetch timestamps against the deploy restart time.
-   CM's rollup aging is still real and still affects point spacing/count;
-   check `timeSeries[].metadata.rollupUsed` in the response for actual
-   resolution, never the presence of `aggregateStatistics`.
+   the stripping fix, one postdated it) rather than reflecting CM's rollup
+   aging — confirmed by comparing fetch timestamps against the deploy
+   restart time. CM's rollup aging is still real and still affects point
+   spacing/count; check `timeSeries[].metadata.rollupUsed` in the response
+   for actual resolution, never the presence of `aggregateStatistics`.
 
 Return a structured envelope (`{items, count, truncated, ...,
 effective_range}`) consistent with `get_alerts`/`get_audit_events`/

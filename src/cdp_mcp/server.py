@@ -359,6 +359,7 @@ async def get_service_metrics(
     start_time: str | None = None,
     end_time: str | None = None,
     sample_mode: str = "even",
+    include_aggregate_stats: bool = False,
 ) -> str:
     """
     Query time-series metrics for a service via the CM tsquery API.
@@ -384,6 +385,14 @@ async def get_service_metrics(
                     range. "recent": full-resolution samples for only the most
                     recent slice, older data dropped -- best for "what's this
                     host/service doing right now" incident response.
+      include_aggregate_stats: If true, keep CM's per-point aggregateStatistics
+                    block (min/max/mean/stdDev/count/sampleTime/minTime/maxTime)
+                    instead of stripping it to timestamp/value/type. Off by
+                    default -- it's ~5x the bytes per point and the dominant
+                    driver of oversized responses on wide-range/many-series
+                    calls. Turn on when you specifically need min/max/mean for
+                    a chart or report; combine with a narrower range or fewer
+                    metric_names if the response gets large.
     """
     client = _pool.get_client_for_cluster(cluster_name)
     if client is None:
@@ -397,6 +406,7 @@ async def get_service_metrics(
                 start_time=start_time,
                 end_time=end_time,
                 sample_mode=sample_mode,
+                include_aggregate_stats=include_aggregate_stats,
             )
         )
     except Exception as exc:
@@ -411,6 +421,7 @@ async def get_host_metrics(
     start_time: str | None = None,
     end_time: str | None = None,
     sample_mode: str = "even",
+    include_aggregate_stats: bool = False,
 ) -> str:
     """
     Query time-series metrics for a single host (CPU, memory, disk, network)
@@ -437,6 +448,14 @@ async def get_host_metrics(
                     range. "recent": full-resolution samples for only the most
                     recent slice, older data dropped -- best for "what's this
                     host doing right now" incident response.
+      include_aggregate_stats: If true, keep CM's per-point aggregateStatistics
+                    block (min/max/mean/stdDev/count/sampleTime/minTime/maxTime)
+                    instead of stripping it to timestamp/value/type. Off by
+                    default -- it's ~5x the bytes per point and the dominant
+                    driver of oversized responses on wide-range/many-series
+                    calls. Turn on when you specifically need min/max/mean for
+                    a chart or report; combine with a narrower range or fewer
+                    metric_names if the response gets large.
     """
     client = _pool.get_client_for_cluster(cluster_name)
     if client is None:
@@ -449,6 +468,7 @@ async def get_host_metrics(
                 start_time=start_time,
                 end_time=end_time,
                 sample_mode=sample_mode,
+                include_aggregate_stats=include_aggregate_stats,
             )
         )
     except Exception as exc:

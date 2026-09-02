@@ -93,6 +93,18 @@
     `data_truncated` (true under `"recent"`), and `data_points_available` (the
     original, pre-cap point count).
 
+    Every point is also stripped to `timestamp`/`value`/`type` by default,
+    dropping CM's per-point `aggregateStatistics` block (min/max/mean/stdDev/
+    count/sampleTime/minTime/maxTime) — confirmed live as ~5x the bytes per
+    point and the dominant driver of oversized responses even *within* the
+    point cap. Pass `include_aggregate_stats=True` to keep the full block for
+    calls that specifically need min/max/mean (e.g. a report chart) — don't
+    assume it's simply unavailable; it's opt-in, not gone. `aggregateStatistics`
+    presence/absence is never a signal of CM's own rollup granularity (RAW/
+    TEN_MINUTELY/HOURLY/SIX_HOURLY/DAILY, which CM ages a series through
+    independent of anything this parameter does) — check
+    `timeSeries[].metadata.rollupUsed` in the response for that.
+
 ## Registry Tools
 
 | Tool | Description |

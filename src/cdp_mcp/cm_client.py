@@ -864,22 +864,20 @@ class ClouderaManagerClient:
     # -- confirmed live: ~330 bytes/point vs ~65 for timestamp+value+type, the
     # dominant size driver in real report-generator traffic (4-8MB responses
     # that never even hit MAX_TIMESERIES_POINTS, because the point *count*
-    # was fine -- the point *payload* wasn't). Only timestamp/value/type are
-    # useful for the trend/troubleshooting use cases these tools serve.
+    # was fine -- the point *payload* wasn't).
     #
-    # This strips aggregateStatistics unconditionally -- every point, every
-    # call, regardless of sample_mode and regardless of what rollup
-    # granularity CM used. As of this code shipping, its presence/absence in
-    # the response is NOT a signal of CM's rollup level (RAW/TEN_MINUTELY/
-    # HOURLY/SIX_HOURLY/DAILY) -- it's always absent now. An earlier version
-    # of this comment attributed a same-call HOURLY+agg vs SIX_HOURLY+no-agg
-    # difference to CM's retention aging; that comparison actually straddled
-    # this code's own deploy boundary (one call hit pre-deploy code with raw
-    # CM passthrough, the other hit post-deploy code with unconditional
-    # stripping) and wasn't a clean rollup-driven comparison. CM's rollup
-    # aging as data ages is still real and still affects point spacing/count
-    # -- check `timeSeries[].metadata.rollupUsed` in the response for actual
-    # resolution, never the presence of aggregateStatistics.
+    # Stripped by default (include_aggregate_stats=False) for the common
+    # trend/troubleshooting case, but callers that need min/max/mean/stdDev
+    # (e.g. a report chart) can opt in per call with include_aggregate_stats
+    # =True to get the full block back -- don't silently drop data a caller
+    # explicitly asked for. When stripped, its absence is NOT a signal of
+    # CM's rollup level (RAW/TEN_MINUTELY/HOURLY/SIX_HOURLY/DAILY) -- CM's
+    # own rollup aging as data ages is a real, separate effect on point
+    # spacing/count; check `timeSeries[].metadata.rollupUsed` in the
+    # response for actual resolution, never the presence of
+    # aggregateStatistics (an earlier version of this comment conflated the
+    # two after a same-call comparison that turned out to straddle this
+    # code's own deploy boundary rather than reflect CM's rollup aging).
     _POINT_FIELDS = ("timestamp", "value", "type")
 
     @classmethod
@@ -903,7 +901,10 @@ class ClouderaManagerClient:
 
     @classmethod
     def _cap_timeseries_items(
-        cls, items: list[dict], sample_mode: str = "even"
+        cls,
+        items: list[dict],
+        sample_mode: str = "even",
+        include_aggregate_stats: bool = False,
     ) -> tuple[list[dict], bool]:
         if sample_mode not in cls.SAMPLE_MODES:
             raise ValueError(f"sample_mode must be one of {cls.SAMPLE_MODES}, got {sample_mode!r}")
@@ -912,7 +913,12 @@ class ClouderaManagerClient:
         for item in items:
             capped_series = []
             for ts in item.get("timeSeries") or []:
-                points = [cls._slim_point(p) for p in (ts.get("data") or [])]
+                raw_points = ts.get("data") or []
+                points = (
+                    list(raw_points)
+                    if include_aggregate_stats
+                    else [cls._slim_point(p) for p in raw_points]
+                )
                 if len(points) > cls.MAX_TIMESERIES_POINTS:
                     truncated = True
                     if sample_mode == "recent":
@@ -957,6 +963,7 @@ class ClouderaManagerClient:
         start_time: str | None = None,
         end_time: str | None = None,
         sample_mode: str = "even",
+        include_aggregate_stats: bool = False,
     ) -> dict[str, Any]:
         time_range_defaulted = start_time is None and end_time is None
         start_time, end_time = self._validate_time_range(start_time, end_time)
@@ -972,7 +979,9 @@ class ClouderaManagerClient:
             "to": end_time,
         }
         data = await self._post("/timeseries", json=body)
-        items, truncated = self._cap_timeseries_items(data.get("items", []), sample_mode)
+        items, truncated = self._cap_timeseries_items(
+            data.get("items", []), sample_mode, include_aggregate_stats
+        )
         result: dict[str, Any] = {
             "items": items,
             "time_range_defaulted": time_range_defaulted,
@@ -990,6 +999,7 @@ class ClouderaManagerClient:
         start_time: str | None = None,
         end_time: str | None = None,
         sample_mode: str = "even",
+        include_aggregate_stats: bool = False,
     ) -> dict[str, Any]:
         time_range_defaulted = start_time is None and end_time is None
         start_time, end_time = self._validate_time_range(start_time, end_time)
@@ -1001,7 +1011,9 @@ class ClouderaManagerClient:
             "to": end_time,
         }
         data = await self._post("/timeseries", json=body)
-        items, truncated = self._cap_timeseries_items(data.get("items", []), sample_mode)
+        items, truncated = self._cap_timeseries_items(
+            data.get("items", []), sample_mode, include_aggregate_stats
+        )
         result: dict[str, Any] = {
             "items": items,
             "time_range_defaulted": time_range_defaulted,
