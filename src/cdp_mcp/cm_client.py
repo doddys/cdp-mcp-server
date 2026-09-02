@@ -885,19 +885,88 @@ class ClouderaManagerClient:
         return {k: v for k, v in point.items() if k in cls._POINT_FIELDS}
 
     @staticmethod
-    def _downsample_evenly(points: list, max_points: int) -> list:
+    def _point_stat_group(point: dict) -> tuple[float, float, int, float, float, object, object]:
+        """Reduce one raw CM point to (mean, variance, count, min, max,
+        minTime, maxTime) for exact merging. Uses the point's own
+        aggregateStatistics when CM supplied one (e.g. an already-rolled-up
+        point); otherwise treats the point as its own trivial subgroup of
+        one raw sample (count=1, variance=0) -- this is what makes merging
+        correct whether or not CM had already aggregated the data (fresh/
+        RAW-granularity points never carry aggregateStatistics, since a raw
+        sample has nothing to aggregate over)."""
+        value = point.get("value")
+        ts = point.get("timestamp")
+        agg = point.get("aggregateStatistics")
+        if isinstance(agg, dict) and agg.get("count"):
+            count = agg["count"]
+            mean = agg.get("mean", value)
+            variance = (agg.get("stdDev") or 0.0) ** 2
+            pmin = agg.get("min", value)
+            pmax = agg.get("max", value)
+            min_time = agg.get("minTime", ts)
+            max_time = agg.get("maxTime", ts)
+        else:
+            count = 1
+            mean = value
+            variance = 0.0
+            pmin = value
+            pmax = value
+            min_time = ts
+            max_time = ts
+        return mean, variance, count, pmin, pmax, min_time, max_time
+
+    @staticmethod
+    def _merge_stat_groups(groups: list[tuple]) -> dict:
+        """Combine per-point/per-subgroup (mean, variance, count, min, max,
+        minTime, maxTime) tuples into one exact merged summary -- mean/
+        variance combination is a standard identity (parallel/pooled
+        variance), exact as long as each input subgroup's own stats are
+        correct, which holds here (either CM-computed or a trivial n=1 raw
+        sample). min/max/count combine trivially exactly regardless."""
+        total_n = sum(g[2] for g in groups)
+        combined_mean = sum(g[0] * g[2] for g in groups) / total_n
+        combined_var = (
+            sum(g[2] * (g[1] + (g[0] - combined_mean) ** 2) for g in groups) / total_n
+        )
+        min_group = min(groups, key=lambda g: g[3])
+        max_group = max(groups, key=lambda g: g[4])
+        return {
+            "min": min_group[3],
+            "max": max_group[4],
+            "mean": combined_mean,
+            "count": total_n,
+            "stdDev": combined_var**0.5,
+            "minTime": min_group[5],
+            "maxTime": max_group[6],
+        }
+
+    @classmethod
+    def _bucket_merge_series(cls, points: list[dict], max_points: int) -> list[dict]:
+        """Partition points into max_points contiguous buckets spanning the
+        full input range and merge each into one synthesized point --
+        replaces pick-one-and-discard decimation, which silently drops the
+        min/max/shape of every skipped point between kept samples (a real
+        accuracy problem for a report, not just a size one). Each output
+        point's "value" is the bucket mean and its aggregateStatistics is
+        the exact merge of every point in that bucket (see
+        _merge_stat_groups)."""
         n = len(points)
-        if n <= max_points or max_points <= 1:
-            return points[:max_points] if max_points >= 1 else points
-        step = (n - 1) / (max_points - 1)
-        seen: set[int] = set()
-        result = []
-        for k in range(max_points):
-            idx = round(k * step)
-            if idx not in seen:
-                seen.add(idx)
-                result.append(points[idx])
-        return result
+        merged = []
+        for i in range(max_points):
+            start = i * n // max_points
+            end = (i + 1) * n // max_points
+            bucket = points[start:end]
+            groups = [cls._point_stat_group(p) for p in bucket]
+            stats = cls._merge_stat_groups(groups)
+            merged.append(
+                {
+                    "timestamp": bucket[-1]["timestamp"],
+                    "value": stats["mean"],
+                    "type": "AGGREGATE",
+                    "aggregateStatistics": stats,
+                }
+            )
+        return merged
 
     @classmethod
     def _cap_timeseries_items(
@@ -914,26 +983,43 @@ class ClouderaManagerClient:
             capped_series = []
             for ts in item.get("timeSeries") or []:
                 raw_points = ts.get("data") or []
-                points = (
-                    list(raw_points)
-                    if include_aggregate_stats
-                    else [cls._slim_point(p) for p in raw_points]
-                )
-                if len(points) > cls.MAX_TIMESERIES_POINTS:
+                if len(raw_points) > cls.MAX_TIMESERIES_POINTS:
                     truncated = True
                     if sample_mode == "recent":
-                        capped_points = points[-cls.MAX_TIMESERIES_POINTS :]
+                        kept = raw_points[-cls.MAX_TIMESERIES_POINTS :]
+                        out_points = (
+                            kept if include_aggregate_stats else [cls._slim_point(p) for p in kept]
+                        )
+                        ts = {
+                            **ts,
+                            "data": out_points,
+                            "data_downsampled": False,
+                            "data_truncated": True,
+                            "data_points_available": len(raw_points),
+                        }
                     else:
-                        capped_points = cls._downsample_evenly(points, cls.MAX_TIMESERIES_POINTS)
-                    ts = {
-                        **ts,
-                        "data": capped_points,
-                        "data_downsampled": sample_mode == "even",
-                        "data_truncated": sample_mode == "recent",
-                        "data_points_available": len(points),
-                    }
+                        merged = cls._bucket_merge_series(raw_points, cls.MAX_TIMESERIES_POINTS)
+                        out_points = (
+                            merged
+                            if include_aggregate_stats
+                            else [cls._slim_point(p) for p in merged]
+                        )
+                        ts = {
+                            **ts,
+                            "data": out_points,
+                            "data_downsampled": True,
+                            "data_truncated": False,
+                            "data_points_available": len(raw_points),
+                        }
+                        if include_aggregate_stats:
+                            ts["aggregate_stats_synthesized"] = True
                 else:
-                    ts = {**ts, "data": points}
+                    out_points = (
+                        raw_points
+                        if include_aggregate_stats
+                        else [cls._slim_point(p) for p in raw_points]
+                    )
+                    ts = {**ts, "data": out_points}
                 capped_series.append(ts)
             capped_items.append({**item, "timeSeries": capped_series})
         return capped_items, truncated
@@ -949,10 +1035,12 @@ class ClouderaManagerClient:
             )
         return (
             f"One or more series exceeded {cls.MAX_TIMESERIES_POINTS} points and "
-            "were downsampled to an even spread across the range (first/last "
-            "sample kept) -- pass sample_mode='recent' for full-resolution recent "
-            "data, or narrow start_time/end_time / reduce metric_names for full-"
-            "resolution data."
+            "were merged into evenly spaced aggregate buckets spanning the full "
+            "range -- each bucket's value is a mean over its underlying points "
+            "(with min/max/count/stdDev in aggregateStatistics when "
+            "include_aggregate_stats is set), not a single raw CM sample. Pass "
+            "sample_mode='recent' for full-resolution recent data, or narrow "
+            "start_time/end_time / reduce metric_names for full-resolution data."
         )
 
     async def get_service_metrics(

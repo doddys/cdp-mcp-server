@@ -71,12 +71,17 @@
     client-side to **2000 points**, in one of two caller-selectable ways via
     `sample_mode`:
 
-    - `"even"` (default) — evenly spaced samples spanning the **full**
-      requested range, first and last sample always kept. Use this for
-      trend/capacity queries over a wide window (e.g. a monthly report) —
-      resolution drops, but the whole period is represented. For 2000 points
-      over 30 days, expect roughly one sample every ~22 minutes regardless of
-      the metric's native sampling rate.
+    - `"even"` (default) — the full range is partitioned into 2000 contiguous
+      buckets and each is **merged**, not decimated: every point's value is a
+      mean over its bucket (never an arbitrary raw sample that happened to
+      land on a kept index — picking one point and discarding the rest would
+      silently lose every spike/dip in between, which is a real accuracy
+      problem for a report, not just a size one). Use this for trend/capacity
+      queries over a wide window (e.g. a monthly report) — resolution drops,
+      but the whole period is represented and every value is a genuine
+      summary of its window. For 2000 buckets over 30 days, expect roughly
+      one bucket every ~22 minutes regardless of the metric's native
+      sampling rate.
     - `"recent"` — full native-resolution samples for only the **most
       recent** slice; older data is dropped entirely. Use this for "what's
       happening right now" incident response, not for period-spanning
@@ -97,10 +102,21 @@
     dropping CM's per-point `aggregateStatistics` block (min/max/mean/stdDev/
     count/sampleTime/minTime/maxTime) — confirmed live as ~5x the bytes per
     point and the dominant driver of oversized responses even *within* the
-    point cap. Pass `include_aggregate_stats=True` to keep the full block for
-    calls that specifically need min/max/mean (e.g. a report chart) — don't
-    assume it's simply unavailable; it's opt-in, not gone. `aggregateStatistics`
-    presence/absence is never a signal of CM's own rollup granularity (RAW/
+    point cap. Pass `include_aggregate_stats=True` to keep it for calls that
+    specifically need min/max/mean (e.g. a report chart) — don't assume it's
+    simply unavailable; it's opt-in, not gone.
+
+    When `"even"`-mode bucketing merges multiple points together,
+    `include_aggregate_stats=True` gets a **synthesized** `aggregateStatistics`
+    block per bucket (min/max/mean/count/stdDev/minTime/maxTime over every
+    point the bucket collapsed) — computed via an exact pooled-variance merge
+    that's correct whether or not CM's own points already carried their own
+    `aggregateStatistics` (fresh/RAW-granularity points never do, since a raw
+    sample has nothing to aggregate over; the merge treats those as trivial
+    one-sample subgroups). The series carries `aggregate_stats_synthesized:
+    true` whenever this happened, so it's never mistaken for a value CM
+    itself returned. `aggregateStatistics` presence/absence — synthesized or
+    native — is never a signal of CM's own rollup granularity (RAW/
     TEN_MINUTELY/HOURLY/SIX_HOURLY/DAILY, which CM ages a series through
     independent of anything this parameter does) — check
     `timeSeries[].metadata.rollupUsed` in the response for that.
@@ -185,15 +201,19 @@
 
 1. `get_service_metrics` / `get_host_metrics` with `start_time`/`end_time`
    spanning the full period and **`sample_mode="even"`** (pass it explicitly
-   — don't rely on the default in case it changes) → evenly spaced samples
-   across the whole range, suitable for a trend chart.
+   — don't rely on the default in case it changes) → each returned point is
+   a merged bucket mean spanning the whole range, suitable for a trend chart.
+   Add `include_aggregate_stats=True` if the report needs min/max (e.g. a
+   band around the trend line, or "peak CPU this week") — those are exact
+   merged values, not raw CM samples, and the series carries
+   `aggregate_stats_synthesized: true` when so.
 2. Check `truncated`/`data_points_available` on the response — if truncated,
-   footnote the chart with the effective resolution (2000 points over the
+   footnote the chart with the effective resolution (2000 buckets over the
    period) rather than presenting it as native-resolution data.
 3. To zoom into a specific incident found in the overview, issue a second,
    narrow-range call for just that window (a day or a few hours) — native
    resolution is unlikely to exceed the cap at that scale, so either
-   `sample_mode` works.
+   `sample_mode` works and no merging happens.
 
 ### Replication — monthly report / which jobs failed this month?
 

@@ -141,6 +141,79 @@ async def test_get_host_metrics_include_aggregate_stats_keeps_full_point(client)
     assert result["items"][0]["timeSeries"][0]["data"][0] == point
 
 
+def test_point_stat_group_raw_point_is_trivial_subgroup():
+    """A point with no aggregateStatistics (fresh/RAW-granularity CM data)
+    must reduce to its own trivial subgroup -- count=1, variance=0 -- so
+    merging it with CM-native subgroups is still exact."""
+    point = {"timestamp": "t1", "value": 5.0}
+    assert ClouderaManagerClient._point_stat_group(point) == (5.0, 0.0, 1, 5.0, 5.0, "t1", "t1")
+
+
+def test_point_stat_group_uses_cm_native_aggregate_statistics():
+    point = {
+        "timestamp": "t1",
+        "value": 10.0,
+        "aggregateStatistics": {
+            "count": 2, "mean": 10, "stdDev": 1, "min": 9, "max": 11,
+            "minTime": "tA_min", "maxTime": "tA_max",
+        },
+    }
+    assert ClouderaManagerClient._point_stat_group(point) == (10, 1.0, 2, 9, 11, "tA_min", "tA_max")
+
+
+def test_merge_stat_groups_exact_pooled_variance():
+    """Hand-computed: combining a (mean=10, var=1, n=2) subgroup with a
+    (mean=20, var=4, n=3) subgroup via the pooled-variance identity."""
+    groups = [
+        (10, 1, 2, 9, 11, "tA_min", "tA_max"),
+        (20, 4, 3, 18, 22, "tB_min", "tB_max"),
+    ]
+    result = ClouderaManagerClient._merge_stat_groups(groups)
+    assert result["count"] == 5
+    assert result["mean"] == pytest.approx(16.0)
+    assert result["min"] == 9
+    assert result["max"] == 22
+    assert result["minTime"] == "tA_min"
+    assert result["maxTime"] == "tB_max"
+    assert result["stdDev"] == pytest.approx(26.8**0.5)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_host_metrics_even_mode_synthesizes_aggregate_stats(client):
+    """End-to-end: downsampling in "even" mode with include_aggregate_stats
+    must merge (not decimate) -- the first bucket here covers exactly two
+    raw points (values 0 and 1), so its synthesized stats are hand-checkable:
+    mean=0.5, variance=0.25, stdDev=0.5, min=0, max=1, count=2."""
+    points = [{"timestamp": f"t{i}", "value": float(i)} for i in range(5000)]
+    respx.post(f"{BASE}/timeseries").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "items": [
+                    {"timeSeries": [{"metadata": {"metricName": "cpu_percent"}, "data": points}]}
+                ]
+            },
+        )
+    )
+    result = await client.get_host_metrics(
+        "host1.example.com", ["cpu_percent"], include_aggregate_stats=True
+    )
+    ts = result["items"][0]["timeSeries"][0]
+    assert ts["aggregate_stats_synthesized"] is True
+    first = ts["data"][0]
+    assert first["type"] == "AGGREGATE"
+    assert first["value"] == pytest.approx(0.5)
+    stats = first["aggregateStatistics"]
+    assert stats["count"] == 2
+    assert stats["min"] == 0.0
+    assert stats["max"] == 1.0
+    assert stats["mean"] == pytest.approx(0.5)
+    assert stats["stdDev"] == pytest.approx(0.5)
+    # last bucket's time coverage still reaches the end of the original range
+    assert ts["data"][-1]["timestamp"] == points[-1]["timestamp"]
+
+
 @respx.mock
 @pytest.mark.asyncio
 async def test_get_host_metrics_downsamples_evenly_by_default(client):
@@ -157,10 +230,12 @@ async def test_get_host_metrics_downsamples_evenly_by_default(client):
     )
     result = await client.get_host_metrics("host1.example.com", ["cpu_percent"])
     ts = result["items"][0]["timeSeries"][0]
-    assert len(ts["data"]) <= ClouderaManagerClient.MAX_TIMESERIES_POINTS
-    # even spread across the whole range, not a trailing slice
-    assert ts["data"][0] == points[0]
-    assert ts["data"][-1] == points[-1]
+    # exactly max_points buckets, each a merged mean -- not a trailing slice
+    assert len(ts["data"]) == ClouderaManagerClient.MAX_TIMESERIES_POINTS
+    assert ts["data"][0]["type"] == "AGGREGATE"
+    assert "aggregateStatistics" not in ts["data"][0]  # stripped: include_aggregate_stats=False
+    # time coverage spans the whole original range
+    assert ts["data"][-1]["timestamp"] == points[-1]["timestamp"]
     assert ts["data_downsampled"] is True
     assert "data_truncated" not in ts or ts["data_truncated"] is False
     assert ts["data_points_available"] == 5000

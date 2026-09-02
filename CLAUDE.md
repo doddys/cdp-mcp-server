@@ -184,18 +184,35 @@ response can grow large must bound itself, in this order of preference:
    aggregated into totals — they're continuous series where the caller wants
    the *shape*, not a subset. `get_service_metrics`/`get_host_metrics` cap
    each series to `ClouderaManagerClient.MAX_TIMESERIES_POINTS` (2000) and
-   offer a `sample_mode` so the caller picks the trade-off: `"even"` spreads
-   samples across the full requested range (trend queries), `"recent"` keeps
-   full resolution for only the most recent slice (incident response).
+   offer a `sample_mode` so the caller picks the trade-off: `"even"` merges
+   the full range into 2000 contiguous buckets (trend queries), `"recent"`
+   keeps full resolution for only the most recent slice (incident response).
    Confirmed live: an uncapped `get_host_metrics` call returned ~17MB, slow
    enough end-to-end (through the deployment's masking proxy) that the
-   downstream MCP client gave up and dropped the connection. Every point is
-   also slimmed to `timestamp`/`value`/`type` by default, stripping CM's
-   verbose per-point `aggregateStatistics` block (min/max/mean/stdDev/count/
-   sampleTime/minTime/maxTime, ~5x the bytes of a bare point) — the dominant
-   size driver even *within* the point cap on real report-generator traffic.
-   This is opt-out, not silent data loss: pass `include_aggregate_stats=True`
-   when a caller specifically needs min/max/mean (e.g. a report chart).
+   downstream MCP client gave up and dropped the connection.
+
+   `"even"` mode **merges** buckets rather than picking one representative
+   point and discarding the rest — decimation would silently drop every
+   spike/dip between kept samples, which is an accuracy problem for a report,
+   not just a size one. Each bucket's `value` is a mean over its underlying
+   points, computed via `_bucket_merge_series`/`_merge_stat_groups`: an exact
+   pooled-variance merge (min-of-mins, max-of-maxes, summed counts, combined
+   mean/stdDev via the standard parallel-variance identity) that's correct
+   whether or not CM's own points already carried `aggregateStatistics` —
+   fresh/RAW-granularity points never do (nothing to aggregate over yet), so
+   `_point_stat_group` treats those as trivial one-sample subgroups; the math
+   is uniform either way, not an approximation.
+
+   Every point is also slimmed to `timestamp`/`value`/`type` by default,
+   stripping CM's verbose per-point `aggregateStatistics` block (min/max/
+   mean/stdDev/count/sampleTime/minTime/maxTime, ~5x the bytes of a bare
+   point) — the dominant size driver even *within* the point cap on real
+   report-generator traffic. This is opt-out, not silent data loss: pass
+   `include_aggregate_stats=True` when a caller specifically needs min/max/
+   mean (e.g. a report chart) — under `"even"` mode this returns the
+   *synthesized* merged stats above, flagged on the series with
+   `aggregate_stats_synthesized: true` so it's never mistaken for a value CM
+   itself returned.
    `aggregateStatistics` presence/absence is never a signal of CM's own
    rollup level (RAW/TEN_MINUTELY/HOURLY/SIX_HOURLY/DAILY, which CM ages a
    series through independent of this parameter) — a same-nominal-window
