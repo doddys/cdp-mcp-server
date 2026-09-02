@@ -191,16 +191,19 @@ response can grow large must bound itself, in this order of preference:
    enough end-to-end (through the deployment's masking proxy) that the
    downstream MCP client gave up and dropped the connection. Every point is
    also slimmed to `timestamp`/`value`/`type`, stripping CM's verbose
-   per-point `aggregateStatistics` block when present — but its presence is
-   CM's call, not this code's: CM auto-rolls a series to coarser granularity
-   as the queried period ages in its retention store (RAW → TEN_MINUTELY →
-   HOURLY → SIX_HOURLY → DAILY), and `aggregateStatistics` only accompanies
-   some of those levels. Confirmed live: re-querying the *same* nominal
-   weekly window days apart returned HOURLY+`aggregateStatistics` when fresh
-   vs. SIX_HOURLY with no `aggregateStatistics` once CM aged it further — a
-   difference in response shape/size between two runs of "the same period"
-   isn't necessarily this code changing behavior; check
-   `timeSeries[].metadata.rollupUsed` in the raw response first.
+   per-point `aggregateStatistics` block **unconditionally** — every call,
+   every point, regardless of `sample_mode` and regardless of what rollup
+   granularity CM used. Its presence/absence in the response is *not* a
+   signal of CM's rollup level (RAW/TEN_MINUTELY/HOURLY/SIX_HOURLY/DAILY,
+   which CM auto-rolls a series through as the queried period ages in its
+   retention store) — it's always absent now. A same-nominal-window
+   comparison that looked like "fresh=HOURLY+agg vs aged=SIX_HOURLY+no-agg"
+   turned out to straddle this code's own deploy boundary (one fetch predated
+   the fix, one postdated it) rather than reflecting CM's rollup aging —
+   confirmed by comparing fetch timestamps against the deploy restart time.
+   CM's rollup aging is still real and still affects point spacing/count;
+   check `timeSeries[].metadata.rollupUsed` in the response for actual
+   resolution, never the presence of `aggregateStatistics`.
 
 Return a structured envelope (`{items, count, truncated, ...,
 effective_range}`) consistent with `get_alerts`/`get_audit_events`/

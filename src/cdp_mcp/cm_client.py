@@ -867,19 +867,19 @@ class ClouderaManagerClient:
     # was fine -- the point *payload* wasn't). Only timestamp/value/type are
     # useful for the trend/troubleshooting use cases these tools serve.
     #
-    # Whether aggregateStatistics is present at all is CM's call, not this
-    # code's: CM auto-rolls a series up through coarser granularities as the
-    # queried period ages in its retention store (RAW -> TEN_MINUTELY ->
-    # HOURLY -> SIX_HOURLY -> DAILY), and aggregateStatistics only accompanies
-    # some of those levels -- confirmed live: re-querying the *same* nominal
-    # weekly window days later, after CM had aged it further, returned
-    # SIX_HOURLY points with no aggregateStatistics at all, versus HOURLY+agg
-    # when the window was fresh. _slim_point is a no-op when the field was
-    # never there, so this is harmless either way, but don't read a
-    # difference in point shape/size between two runs "of the same period"
-    # as a regression here -- check what rollup CM actually used
-    # (`timeSeries[].metadata.rollupUsed` in the raw response) before
-    # assuming sample_mode or this slimming logic changed behavior.
+    # This strips aggregateStatistics unconditionally -- every point, every
+    # call, regardless of sample_mode and regardless of what rollup
+    # granularity CM used. As of this code shipping, its presence/absence in
+    # the response is NOT a signal of CM's rollup level (RAW/TEN_MINUTELY/
+    # HOURLY/SIX_HOURLY/DAILY) -- it's always absent now. An earlier version
+    # of this comment attributed a same-call HOURLY+agg vs SIX_HOURLY+no-agg
+    # difference to CM's retention aging; that comparison actually straddled
+    # this code's own deploy boundary (one call hit pre-deploy code with raw
+    # CM passthrough, the other hit post-deploy code with unconditional
+    # stripping) and wasn't a clean rollup-driven comparison. CM's rollup
+    # aging as data ages is still real and still affects point spacing/count
+    # -- check `timeSeries[].metadata.rollupUsed` in the response for actual
+    # resolution, never the presence of aggregateStatistics.
     _POINT_FIELDS = ("timestamp", "value", "type")
 
     @classmethod
