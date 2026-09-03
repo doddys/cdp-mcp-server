@@ -49,6 +49,9 @@ RUN
 .claude/sessions/
 .claude/reports/
 
+# Collector output — real cluster/host/IP data from cdp-collect runs
+collector-output/
+
 # IDE
 .vscode/settings.json
 .idea/
