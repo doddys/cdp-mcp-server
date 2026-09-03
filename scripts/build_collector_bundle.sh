@@ -47,8 +47,21 @@ BUNDLE_DIR="$BUILD_DIR/$BUNDLE_NAME"
 VENDOR_DIR="$BUNDLE_DIR/vendor"
 mkdir -p "$VENDOR_DIR"
 
-echo "==> Building cdp-mcp wheel"
 cd "$REPO_ROOT"
+
+# A fresh checkout (e.g. one just built on a build box for the first time,
+# as opposed to an existing dev machine that already ran `uv sync`) has no
+# .venv yet -- bootstrap one rather than failing with uv's opaque
+# "No interpreter found at path .venv/bin/python" (hit this literally
+# building on a fresh VPS checkout). Version matches the Quick Setup section
+# of CLAUDE.md; only the interpreter is needed here, not the project's own
+# runtime deps, since this .venv exists solely to run the build backend.
+if [ ! -x "$REPO_ROOT/.venv/bin/python" ]; then
+    echo "==> No .venv found -- bootstrapping one (uv venv --python 3.12)"
+    uv venv --python 3.12
+fi
+
+echo "==> Building cdp-mcp wheel"
 rm -f dist/*.whl
 # The wheel itself is pure Python (py3-none-any) -- --python here only picks
 # which interpreter runs the build backend, unrelated to TARGET_PLATFORM/
