@@ -203,6 +203,20 @@ def _const_fetch(value: Any) -> Callable[[], Awaitable[Any]]:
     return lambda: _as_coro(value)
 
 
+def _write_not_available(
+    rel: str, tool: str, out_dir: Path, manifest: Manifest, reason: str
+) -> None:
+    data = {"status": "not_available", "reason": reason}
+    sha, size = write_json(out_dir / rel, data)
+    manifest.add(
+        FileRecord(
+            file=rel, tool=tool, sha256=sha, bytes=size, item_count=0, status="not_available"
+        )
+    )
+    save_manifest(out_dir / MANIFEST_FILENAME, manifest)
+    log.info("collect.not_available", path=rel, reason=reason)
+
+
 async def _write_entity(
     rel: str,
     tool: str,
@@ -232,24 +246,39 @@ async def _write_entity(
     count >= floor_limit means "at least this many, not exhaustive", which
     also gets embedded into the written JSON's own `truncated` field so a
     later merge step (see collect_impala_queries/collect_yarn_long_apps)
-    can combine it across chunks without re-deriving the heuristic."""
+    can combine it across chunks without re-deriving the heuristic.
+
+    A failed call still writes a file -- {"status": "not_available",
+    "reason": ...} -- rather than nothing at all, so cdp-report-curate's
+    Prerequisites check (which needs "attempted and failed" distinguishable
+    from "never collected", and both distinguishable from a genuine
+    zero-result success) always finds the file it expects. A record with
+    status="not_available" is NOT treated as done on resume -- it's retried,
+    since the underlying cause (a permission grant, a kinit, a transient
+    network blip) may have been fixed since the failed attempt."""
     path = out_dir / rel
-    if manifest.has(rel):
+    existing = manifest.get(rel)
+    if existing is not None and existing.status != "not_available":
         log.info("collect.skip_resumed", path=rel)
         try:
             return json.loads(path.read_text())
         except Exception:
             log.warning("collect.resume_read_failed", path=rel)
             return None
+    if existing is not None:
+        log.info("collect.retry_previously_failed", path=rel, reason="status was not_available")
     try:
         data = await fetch()
     except SpnegoRequiredError:
+        reason = f"SPNEGO/Kerberos auth required for {downstream_service or 'this'} service"
         log.warning("collect.spnego_required", path=rel, service=downstream_service)
         if pool is not None and cluster is not None and downstream_service is not None:
             pool.mark_spnego_required(cluster, downstream_service)
+        _write_not_available(rel, tool, out_dir, manifest, reason)
         return None
     except Exception as exc:
         log.warning("collect.entity_failed", path=rel, error=str(exc))
+        _write_not_available(rel, tool, out_dir, manifest, str(exc))
         return None
 
     n = count_fn(data)
@@ -844,12 +873,29 @@ async def collect_cluster(
         )
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    manifest = load_manifest(out_dir / MANIFEST_FILENAME) or Manifest(
-        period={"label": period_label or _default_period_label(start), "start": start, "end": end},
-        cluster={"hint": cluster_hint or _slugify(cluster), "resolved_name": cluster},
-        cdp_mcp_version=_cdp_mcp_version(),
-        generated_at=datetime.now(UTC).isoformat(),
-    )
+    manifest = load_manifest(out_dir / MANIFEST_FILENAME)
+    if manifest is not None and (
+        manifest.period.get("start") != start or manifest.period.get("end") != end
+    ):
+        # Resuming reuses whatever period the existing _manifest.json already
+        # has -- silently, since load_manifest() has no way to know this run
+        # asked for something different. Loading old files under a new
+        # period's label would be worse than refusing: every entity in this
+        # directory would look like it covers [start, end) when it actually
+        # covers the manifest's original range.
+        raise SystemExit(
+            f"{out_dir} already has _manifest.json for period "
+            f"{manifest.period.get('start')} -> {manifest.period.get('end')}, "
+            f"but this run requested {start} -> {end}. Use a different --out "
+            "directory for a different period, or delete the existing one to start over."
+        )
+    if manifest is None:
+        manifest = Manifest(
+            period={"label": period_label or _default_period_label(start), "start": start, "end": end},
+            cluster={"hint": cluster_hint or _slugify(cluster), "resolved_name": cluster},
+            cdp_mcp_version=_cdp_mcp_version(),
+            generated_at=datetime.now(UTC).isoformat(),
+        )
 
     await collect_bootstrap(client, cluster, out_dir, manifest)
 

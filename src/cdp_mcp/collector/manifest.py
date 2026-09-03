@@ -31,6 +31,14 @@ class FileRecord:
     truncated: bool | None = None  # only set for entities with truncation semantics
     total_matched_in_range: int | None = None  # only set when the source call reports one
     metric_names: list[str] = field(default_factory=list)
+    # "not_available" when the underlying call failed/was denied -- the file
+    # still exists (see collect.py's _write_not_available) with
+    # {"status": "not_available", "reason": ...} as its content, so a bare
+    # empty []/{} can never be mistaken for "we don't know" (cdp-report-curate
+    # needs this distinction for its Prerequisites check). None otherwise --
+    # not forced to "ok", since a present "not_available" is the meaningful
+    # signal and its absence already reads as fine.
+    status: str | None = None
 
 
 @dataclass
@@ -43,6 +51,9 @@ class Manifest:
 
     def has(self, file: str) -> bool:
         return any(f.file == file for f in self.files)
+
+    def get(self, file: str) -> FileRecord | None:
+        return next((f for f in self.files if f.file == file), None)
 
     def add(self, record: FileRecord) -> None:
         self.files = [f for f in self.files if f.file != record.file]
