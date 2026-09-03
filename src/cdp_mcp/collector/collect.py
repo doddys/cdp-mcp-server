@@ -174,6 +174,26 @@ def _default_period_label(start: str) -> str:
     return dt.strftime("%B %Y")
 
 
+def _to_utc_z(iso: str) -> str:
+    """Normalize any valid ISO 8601 timestamp -- any explicit offset, or a
+    bare 'Z' -- to the equivalent UTC instant, 'Z'-suffixed. Every CM call
+    and chunk-boundary calculation in this module has only been verified
+    against 'Z' timestamps; converting once here, before anything else uses
+    start/end, removes any dependency on CM's REST API correctly
+    interpreting an arbitrary non-'Z' offset server-side, which was never
+    actually verified (a request built with an explicit +07:00 offset had
+    only been confirmed to round-trip correctly through this module's own
+    Python datetime handling, not confirmed against what CM does with it).
+    Must run AFTER _default_period_label(), never before -- converting first
+    can shift the instant onto the wrong calendar month near a day boundary
+    in a non-UTC timezone (Jakarta midnight Aug 1 is UTC Jul 31 17:00;
+    labeling from the converted value would say "July")."""
+    dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
     return slug or "cluster"
@@ -505,6 +525,21 @@ def _merge_timeseries_chunks(chunks: list[dict]) -> dict:
                     series_by_key[key]["data"].extend(ts.get("data", []))
     for ts in series_by_key.values():
         ts["data"].sort(key=lambda p: p.get("timestamp", ""))
+        # Adjacent chunks share a boundary instant (chunk N's end == chunk
+        # N+1's start) and CM's /timeseries from/to appear inclusive on both
+        # ends -- confirmed live: exactly one duplicate point per internal
+        # chunk seam, same timestamp in both chunks' responses. Dropping the
+        # second occurrence keeps the series strictly increasing, which
+        # every downstream consumer assuming a monotonic series needs.
+        deduped: list[dict] = []
+        seen_timestamps: set[str] = set()
+        for point in ts["data"]:
+            ts_value = point.get("timestamp")
+            if ts_value in seen_timestamps:
+                continue
+            seen_timestamps.add(ts_value)
+            deduped.append(point)
+        ts["data"] = deduped
     merged_series = [series_by_key[k] for k in order]
     items = [{"timeSeries": merged_series, "warnings": warnings}] if merged_series else []
     start = chunks[0]["effective_range"]["start"] if chunks and chunks[0].get("effective_range") else None
@@ -872,6 +907,14 @@ async def collect_cluster(
             f"Unknown cluster {cluster!r}. Known clusters: {pool.list_known_clusters()}"
         )
 
+    # Resolve the human-readable label from the ORIGINAL start string before
+    # normalizing to UTC below -- see _to_utc_z's docstring for why the order
+    # matters (a non-UTC offset can shift the instant onto a different
+    # calendar day/month than the one the operator actually meant).
+    resolved_period_label = period_label or _default_period_label(start)
+    start = _to_utc_z(start)
+    end = _to_utc_z(end)
+
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = load_manifest(out_dir / MANIFEST_FILENAME)
     if manifest is not None and (
@@ -891,7 +934,7 @@ async def collect_cluster(
         )
     if manifest is None:
         manifest = Manifest(
-            period={"label": period_label or _default_period_label(start), "start": start, "end": end},
+            period={"label": resolved_period_label, "start": start, "end": end},
             cluster={"hint": cluster_hint or _slugify(cluster), "resolved_name": cluster},
             cdp_mcp_version=_cdp_mcp_version(),
             generated_at=datetime.now(UTC).isoformat(),
