@@ -1043,6 +1043,25 @@ class ClouderaManagerClient:
             "start_time/end_time / reduce metric_names for full-resolution data."
         )
 
+    @staticmethod
+    def _service_tsquery(cluster_name: str, service_name: str, metric_names: list[str]) -> str:
+        metric_selector = ", ".join(metric_names)
+        return (
+            f"SELECT {metric_selector} "
+            f"WHERE clusterName = {cluster_name!r} "
+            f"AND serviceName = {service_name!r}"
+        )
+
+    @staticmethod
+    def _host_tsquery(hostname: str, metric_names: list[str]) -> str:
+        metric_selector = ", ".join(metric_names)
+        return f"SELECT {metric_selector} WHERE hostname = {hostname!r}"
+
+    async def _query_timeseries(self, tsquery: str, start_time: str, end_time: str) -> list[dict]:
+        body = {"query": tsquery, "from": start_time, "to": end_time}
+        data = await self._post("/timeseries", json=body)
+        return data.get("items", [])
+
     async def get_service_metrics(
         self,
         cluster_name: str,
@@ -1055,20 +1074,13 @@ class ClouderaManagerClient:
     ) -> dict[str, Any]:
         time_range_defaulted = start_time is None and end_time is None
         start_time, end_time = self._validate_time_range(start_time, end_time)
-        metric_selector = ", ".join(metric_names)
-        tsquery = (
-            f"SELECT {metric_selector} "
-            f"WHERE clusterName = {cluster_name!r} "
-            f"AND serviceName = {service_name!r}"
+        raw_items = await self._query_timeseries(
+            self._service_tsquery(cluster_name, service_name, metric_names),
+            start_time,
+            end_time,
         )
-        body = {
-            "query": tsquery,
-            "from": start_time,
-            "to": end_time,
-        }
-        data = await self._post("/timeseries", json=body)
         items, truncated = self._cap_timeseries_items(
-            data.get("items", []), sample_mode, include_aggregate_stats
+            raw_items, sample_mode, include_aggregate_stats
         )
         result: dict[str, Any] = {
             "items": items,
@@ -1079,6 +1091,29 @@ class ClouderaManagerClient:
         if truncated:
             result["_truncated"] = [self._truncation_note(sample_mode)]
         return result
+
+    async def get_service_metrics_raw(
+        self,
+        cluster_name: str,
+        service_name: str,
+        metric_names: list[str],
+        start_time: str,
+        end_time: str,
+    ) -> dict[str, Any]:
+        """Uncapped counterpart to get_service_metrics -- skips
+        _cap_timeseries_items entirely, so every point CM returns is kept at
+        full resolution with no MAX_TIMESERIES_POINTS downsampling. For
+        offline/collector use only (cdp_mcp.collector): a wide range x many
+        metrics can return a multi-MB payload, which is fine written straight
+        to a local file but would break the MCP connection if returned as a
+        tool result -- server.py's get_service_metrics tool must keep calling
+        the capped method above, never this one."""
+        items = await self._query_timeseries(
+            self._service_tsquery(cluster_name, service_name, metric_names),
+            start_time,
+            end_time,
+        )
+        return {"items": items, "effective_range": {"start": start_time, "end": end_time}}
 
     async def get_host_metrics(
         self,
@@ -1091,16 +1126,11 @@ class ClouderaManagerClient:
     ) -> dict[str, Any]:
         time_range_defaulted = start_time is None and end_time is None
         start_time, end_time = self._validate_time_range(start_time, end_time)
-        metric_selector = ", ".join(metric_names)
-        tsquery = f"SELECT {metric_selector} WHERE hostname = {hostname!r}"
-        body = {
-            "query": tsquery,
-            "from": start_time,
-            "to": end_time,
-        }
-        data = await self._post("/timeseries", json=body)
+        raw_items = await self._query_timeseries(
+            self._host_tsquery(hostname, metric_names), start_time, end_time
+        )
         items, truncated = self._cap_timeseries_items(
-            data.get("items", []), sample_mode, include_aggregate_stats
+            raw_items, sample_mode, include_aggregate_stats
         )
         result: dict[str, Any] = {
             "items": items,
@@ -1111,6 +1141,19 @@ class ClouderaManagerClient:
         if truncated:
             result["_truncated"] = [self._truncation_note(sample_mode)]
         return result
+
+    async def get_host_metrics_raw(
+        self,
+        hostname: str,
+        metric_names: list[str],
+        start_time: str,
+        end_time: str,
+    ) -> dict[str, Any]:
+        """Uncapped counterpart to get_host_metrics -- see get_service_metrics_raw."""
+        items = await self._query_timeseries(
+            self._host_tsquery(hostname, metric_names), start_time, end_time
+        )
+        return {"items": items, "effective_range": {"start": start_time, "end": end_time}}
 
     async def list_available_metrics(self, name_contains: str | None = None) -> list[dict]:
         """

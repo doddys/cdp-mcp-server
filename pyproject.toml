@@ -69,6 +69,10 @@ kerberos = [
 
 [project.scripts]
 cdp-mcp = "cdp_mcp.server:run"
+# Standalone, offline data collector (no LLM, no MCP transport) for CDP
+# clusters an LLM client cannot reach directly -- see src/cdp_mcp/collector/
+# and scripts/build_collector_bundle.sh for offline packaging.
+cdp-collect = "cdp_mcp.collector.collect:main"
 
 # src-layout package discovery for the PEP 517 build backend (poetry-core).
 # The dev/lock tool is uv; the build backend is independent of it.
