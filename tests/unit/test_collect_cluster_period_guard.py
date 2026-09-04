@@ -1,6 +1,8 @@
 """Unit test for collect_cluster's period-mismatch guard: resuming into an
 --out directory whose _manifest.json already covers a *different* period
 must refuse, not silently resume under the stale period's data."""
+
+from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest

@@ -265,6 +265,8 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_clust
 # Offline collector: build the deployable bundle (see § below)
 scripts/build_collector_bundle.sh
 TARGET_PLATFORM=aarch64-manylinux2014 TARGET_PYTHON=3.12 scripts/build_collector_bundle.sh
+TARGET_PLATFORM=x86_64-manylinux2014 TARGET_PYTHON=3.8 WITH_KERBEROS=true \
+  scripts/build_collector_bundle.sh   # 3.8 supported; Kerberos needs a matching-platform Linux host/container
 WITH_KERBEROS=true scripts/build_collector_bundle.sh   # only on a host matching TARGET_PLATFORM
 
 # Offline collector: run directly from this checkout (no bundle needed for local testing)
@@ -455,6 +457,19 @@ PyPI wheel and a cross-platform build silently compiles it for the *build*
 machine instead (confirmed: building for Linux from macOS produced Mach-O
 binaries vendored into a Linux-labeled bundle with no warning); the script
 refuses a mismatch and prints a Docker recipe instead of doing this.
+Full build → deploy → collect → handoff runbook:
+`docs/collector-deploy.md`.
+**Python 3.8–3.10 targets are supported** (`TARGET_PYTHON=3.8` etc.) even
+though the wheel's metadata says `requires-python >=3.11` (that floor is
+the MCP server's, not the collector's): the build rewrites the wheel's
+`Requires-Python`, vendors `eval_type_backport` for pydantic's `X | Y`
+annotations on old interpreters, and — for 3.8 + Kerberos — pins
+`httpx-gssapi==0.3.1` (0.4 dropped 3.8) with `httpx<0.28`. When building a
+Kerberos bundle inside the Docker recipe, the gssapi C extension must
+compile against a `TARGET_PYTHON` interpreter, so the container's
+`python:<TARGET_PYTHON>-slim` system python is used for that step (the
+script auto-detects a matching system python3; a 3.12-compiled gssapi
+gets tagged cp312 and rejected).
 
 Validated end-to-end against a real production cluster (Astra DaaS DRC,
 Kerberized, reached via a SOCKS5 tunnel + in-process keytab acquisition) —

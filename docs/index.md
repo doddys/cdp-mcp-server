@@ -27,3 +27,6 @@ For a VPS deployment against a **non-Kerberized** cluster, see
 For an unattended VPS deployment with autossh + keytab-backed SPNEGO, see
 [VPS install (autossh/SPNEGO)](vps-install.md); the underlying SOCKS+kinit
 concepts are in [Kerberos tunneling](kerberos-tunneling.md).
+To collect data from a cluster your AI assistant **cannot reach** (air-gapped
+or restricted networks), see
+[Offline collector (cdp-collect)](collector-deploy.md).

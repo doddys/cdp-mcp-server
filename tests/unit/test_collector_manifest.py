@@ -1,4 +1,6 @@
 """Unit tests for cdp_mcp.collector.manifest."""
+
+from __future__ import annotations
 import json
 
 from cdp_mcp.collector.manifest import (

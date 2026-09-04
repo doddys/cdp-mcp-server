@@ -32,6 +32,15 @@ set -euo pipefail
 # Usage: scripts/build_collector_bundle.sh [output_dir]
 # Produces: <output_dir>/cdp-collector-<version>-<platform>.tar.gz
 # Env vars: TARGET_PLATFORM, TARGET_PYTHON, WITH_KERBEROS (default false)
+#
+# Python 3.8-3.10 support: the wheel's metadata declares requires-python
+# >=3.11 (the MCP server's floor -- mcp 1.x needs 3.10+), but the COLLECTOR
+# subpackage alone is 3.8-compatible (verified: full import chain compiles
+# and runs on 3.8 with these exact vendored pins + eval_type_backport for
+# pydantic's `X | Y` annotations). Wheels are installed --no-deps below, so
+# the metadata gate never applies at the client site; the only place it
+# bites is uv's resolver when TARGET_PYTHON < 3.11, which we work around
+# by rewriting the wheel's Requires-Python before vendoring.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${1:-$REPO_ROOT/dist/collector-bundle}"
@@ -39,8 +48,77 @@ TARGET_PLATFORM="${TARGET_PLATFORM:-x86_64-manylinux2014}"
 TARGET_PYTHON="${TARGET_PYTHON:-3.12}"
 WITH_KERBEROS="${WITH_KERBEROS:-false}"
 
-VERSION="$(cd "$REPO_ROOT" && python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
-BUNDLE_NAME="cdp-collector-${VERSION}-${TARGET_PLATFORM}"
+# tomllib is 3.11+; a TARGET_PYTHON<3.11 build container (see the Docker
+# recipe below) runs an older python3, so fall back to a regex there.
+VERSION="$(cd "$REPO_ROOT" && python3 -c '
+try:
+    import tomllib
+    print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])
+except ModuleNotFoundError:
+    import re
+    src = open("pyproject.toml").read()
+    m = re.search(r"^version\s*=\s*\"([^\"]+)\"", src, re.M)
+    print(m.group(1))
+')"
+
+# Rewrite a wheel's Requires-Python from >=3.11 to >=3.8 in-place-ish: unzip,
+# edit METADATA + the *.dist-info WHEEL-safe copy, rezip to a sibling file.
+# Only touches metadata files -- code bytes identical. Used for
+# TARGET_PYTHON < 3.11 builds (see comment near its call site).
+_relax_requires_python() {
+    local in_wheel="$1"
+    local workdir
+    workdir="$(mktemp -d)"
+    python3 - "$in_wheel" "$workdir" <<'PYEOF'
+import os, sys, zipfile
+
+in_wheel, workdir = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(in_wheel) as zf:
+    zf.extractall(workdir)
+
+changed = False
+for root, _dirs, files in os.walk(workdir):
+    for name in files:
+        if name not in ("METADATA",):
+            continue
+        path = os.path.join(root, name)
+        with open(path) as f:
+            lines = f.readlines()
+        out = []
+        for line in lines:
+            if line.startswith("Requires-Python:") and "3.11" in line:
+                out.append("Requires-Python: >=3.8\n")
+                changed = True
+            else:
+                out.append(line)
+        with open(path, "w") as f:
+            f.writelines(out)
+
+if not changed:
+    print("WARNING: no Requires-Python >=3.11 found to relax", file=sys.stderr)
+    sys.exit(1)
+
+# Renamed wheel must stay a valid wheel filename (uv validates it): swap the
+# build tag slot rather than appending a suffix -- "-py38plus" would be an
+# invalid non-numeric build tag.
+out_wheel = os.path.join(
+    os.path.dirname(in_wheel),
+    os.path.basename(in_wheel).replace("-py3-none-any.whl", "-1-py3-none-any.whl"),
+)
+if out_wheel == in_wheel:  # unexpected filename shape -- bail loudly
+    print(f"ERROR: unexpected wheel name {in_wheel!r}", file=sys.stderr)
+    sys.exit(1)
+with zipfile.ZipFile(out_wheel, "w", zipfile.ZIP_DEFLATED) as zf:
+    for root, _dirs, files in os.walk(workdir):
+        for name in files:
+            full = os.path.join(root, name)
+            rel = os.path.relpath(full, workdir)
+            zf.write(full, rel)
+print(out_wheel)
+PYEOF
+}
+
+BUNDLE_NAME="cdp-collector-${VERSION}-${TARGET_PLATFORM}${WITH_KERBEROS:+-kerberos}"
 
 BUILD_DIR="$(mktemp -d)"
 BUNDLE_DIR="$BUILD_DIR/$BUNDLE_NAME"
@@ -70,6 +148,18 @@ rm -f dist/*.whl
 uv build --wheel --python "$REPO_ROOT/.venv/bin/python"
 WHEEL="$(ls -t dist/*.whl | head -1)"
 
+# TARGET_PYTHON < 3.11: rewrite the wheel's Requires-Python so uv's resolver
+# (which DOES check the metadata even with --no-deps) accepts it for the
+# older target. Safe because the vendored code never executes on the build
+# machine and the collector subpackage is genuinely 3.8-compatible; only
+# server.py needs 3.11+, and it is excluded from the collector's imports.
+case "$TARGET_PYTHON" in
+    3.8|3.9|3.10)
+        echo "==> TARGET_PYTHON=$TARGET_PYTHON < 3.11: rewriting wheel Requires-Python"
+        WHEEL="$(_relax_requires_python "$WHEEL")"
+        ;;
+esac
+
 echo "==> Vendoring the wheel itself (--no-deps: its own code only)"
 uv pip install "$WHEEL" --no-deps \
     --target "$VENDOR_DIR" \
@@ -81,16 +171,33 @@ uv pip install "$WHEEL" --no-deps \
 # env_registry}.py, config.py) -- deliberately excludes mcp (server.py only)
 # and impyla/thrift/thrift-sasl/pure-sasl (registry/iceberg.py's _connect()
 # only, never reached by collect.py against a file/env registry backend).
+# eval_type_backport: only needed for TARGET_PYTHON < 3.11 -- lets pydantic
+# evaluate the `X | Y` annotations config.py's models use on old interpreters.
+# Dropped from the pin list on 3.11+ via the conditional below.
 echo "==> Vendoring collector runtime dependencies"
-uv pip install \
-    "httpx[socks]>=0.27.0" \
-    "tenacity>=8.3.0" \
-    "pydantic>=2.7.0" \
-    "pydantic-settings>=2.3.0" \
-    "structlog>=24.2.0" \
-    "python-dotenv>=1.0.0" \
-    "python-dateutil>=2.9.0" \
-    "pyyaml>=6.0.0" \
+DEP_PINS=(
+    "httpx[socks]>=0.27.0"
+    "tenacity>=8.3.0"
+    "pydantic>=2.7.0"
+    "pydantic-settings>=2.3.0"
+    "structlog>=24.2.0"
+    "python-dotenv>=1.0.0"
+    "python-dateutil>=2.9.0"
+    "pyyaml>=6.0.0"
+)
+case "$TARGET_PYTHON" in
+    3.8)
+        # httpx-gssapi 0.3.1 (the last 3.8-capable release, 0.4 dropped 3.8)
+        # pins httpx<0.28 -- cap httpx here too so the resolver picks 0.27.x
+        # ONCE for both this step and the Kerberos step below; resolving 0.28
+        # here and 0.27 there would vendor two httpx versions layered in the
+        # same --target dir (uv overwrites, but only after warning).
+        DEP_PINS=("httpx[socks]>=0.27.0,<0.28" "${DEP_PINS[@]:1}")
+        DEP_PINS+=("eval_type_backport>=0.2")
+        ;;
+    3.9|3.10) DEP_PINS+=("eval_type_backport>=0.2") ;;
+esac
+uv pip install "${DEP_PINS[@]}" \
     --target "$VENDOR_DIR" \
     --python-platform "$TARGET_PLATFORM" \
     --python-version "$TARGET_PYTHON"
@@ -143,7 +250,24 @@ EOF
         exit 1
     fi
     echo "==> Vendoring Kerberos/SPNEGO support (httpx-gssapi) -- native build on matching platform"
-    uv pip install "httpx-gssapi>=0.6.0" --target "$VENDOR_DIR" \
+    # httpx-gssapi 0.4 dropped Python 3.7/3.8; 0.3.1 is the last 3.8-capable
+    # release (pins httpx<0.28, matched above in DEP_PINS). Both support the
+    # HTTPSPNEGOAuth(creds=...) keytab path spnego.py uses.
+    GSSAPI_PIN="httpx-gssapi>=0.6.0"
+    [ "$TARGET_PYTHON" = "3.8" ] && GSSAPI_PIN="httpx-gssapi==0.3.1"
+    # gssapi compiles from source (no wheels); the compiler targets whatever
+    # interpreter uv resolves. Inside the Docker recipe the SYSTEM python3 IS
+    # TARGET_PYTHON, so pin --python to it explicitly for a matching ABI tag
+    # (cp38) -- otherwise uv prefers the bootstrapped .venv's 3.12 and the
+    # built gssapi wheel gets tagged cp312 and rejected below, exactly as if
+    # this had been built on the wrong platform.
+    UV_PYTHON_ARGS=(--python "$REPO_ROOT/.venv/bin/python")
+    if command -v python3 >/dev/null && \
+       TARGET_PYTHON="$TARGET_PYTHON" python3 -c 'import os, sys; sys.exit(0 if "%d.%d" % sys.version_info[:2] == os.environ["TARGET_PYTHON"] else 1)'; then
+        UV_PYTHON_ARGS=(--python "$(command -v python3)")
+    fi
+    uv pip install "$GSSAPI_PIN" --target "$VENDOR_DIR" \
+        "${UV_PYTHON_ARGS[@]}" \
         --python-platform "$TARGET_PLATFORM" --python-version "$TARGET_PYTHON"
 fi
 
@@ -189,12 +313,14 @@ collected (default: all services CM reports for the cluster); `--concurrency
 N` to change how many hosts are polled for metrics at once (default 4).
 
 Re-running with the same `--out` directory resumes: any entity already
-recorded in `output/<name>_<period>/manifest.json` (by exact relative path)
+recorded in `output/<name>_<period>/_manifest.json` (by exact relative path)
 is skipped rather than re-fetched, so an interrupted run or a network blip
-partway through a large cluster doesn't mean starting over.
+partway through a large cluster doesn't mean starting over. A file written
+as {"status": "not_available"} after a failed call is retried on resume --
+fix the cause (permissions, kinit, network) and re-run the same command.
 
 ## After collection
-`output/<name>_<period>/` is self-contained: `manifest.json` (sha256 +
+`output/<name>_<period>/` is self-contained: `_manifest.json` (sha256 +
 counts for every file, so it can be verified after transfer) plus a flat set
 of `NN_<name>.json` files (`01_host_status.json`, `02_roles_hdfs.json`,
 `03_service_metrics_yarn.json`, `06_alerts_CRITICAL_w2.json`, ...) -- the

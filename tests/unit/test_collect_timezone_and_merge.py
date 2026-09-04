@@ -2,6 +2,8 @@
 - _to_utc_z / _default_period_label ordering (Jakarta offset handling)
 - _merge_timeseries_chunks deduping duplicate points at chunk seams
 """
+
+from __future__ import annotations
 from cdp_mcp.collector.collect import (
     _default_period_label,
     _merge_timeseries_chunks,

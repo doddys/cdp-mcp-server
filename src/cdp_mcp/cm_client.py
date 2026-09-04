@@ -5,7 +5,7 @@ cm_client.py — Async HTTP client for the Cloudera Manager REST API.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -192,7 +192,7 @@ class ClouderaManagerClient:
 
     @staticmethod
     def _now_iso() -> str:
-        return datetime.now(UTC).isoformat()
+        return datetime.now(timezone.utc).isoformat()  # noqa: UP017 -- 3.8-compatible (collector bundle)
 
     @staticmethod
     def _validate_time_range(
@@ -200,7 +200,7 @@ class ClouderaManagerClient:
         end_time: str | None,
     ) -> tuple[str, str]:
         from datetime import timedelta
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)  # noqa: UP017 -- 3.8-compatible (collector bundle)
         if end_time is None:
             end_time = now.isoformat()
         if start_time is None:

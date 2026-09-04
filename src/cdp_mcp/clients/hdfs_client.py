@@ -4,7 +4,7 @@ hdfs_client.py — Async client for HDFS NameNode JMX + WebHDFS APIs.
 from __future__ import annotations
 
 import urllib.parse
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -234,7 +234,7 @@ class HdfsClient:
                 {
                     "snapshot_name": s.get("pathSuffix"),
                     "creation_time": (
-                        datetime.fromtimestamp(ms / 1000, tz=UTC).isoformat()
+                        datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()  # noqa: UP017 -- 3.8-compatible (collector bundle)
                         if ms
                         else None
                     ),

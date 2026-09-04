@@ -1,5 +1,7 @@
 """Unit tests for cdp_mcp.collector.collect._write_entity -- the shared
 fetch/record/resume helper every collection step goes through."""
+
+from __future__ import annotations
 import json
 
 import pytest

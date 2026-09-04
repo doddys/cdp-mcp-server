@@ -63,7 +63,7 @@ import json
 import re
 import sys
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -83,6 +83,12 @@ from cdp_mcp.collector.manifest import (
     write_json,
 )
 from cdp_mcp.config import ServerSettings, build_registry
+
+# datetime.UTC is 3.11+; the collector targets 3.8+ (see build_collector_bundle.sh
+# TARGET_PYTHON). Alias the timeless timezone.utc spelling instead -- UP017's
+# datetime.UTC preference reflects the MCP server's py311 floor, not the
+# collector's, so silence it for just this line.
+UTC = timezone.utc  # noqa: UP017 -- deliberate 3.8-compatible spelling
 
 log = structlog.get_logger(__name__)
 

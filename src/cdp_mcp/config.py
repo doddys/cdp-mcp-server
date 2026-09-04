@@ -148,12 +148,11 @@ def build_registry(settings: ServerSettings):
     from cdp_mcp.registry.file_registry import FileRegistry
     from cdp_mcp.registry.iceberg import IcebergRegistry
 
-    match settings.registry_backend:
-        case "iceberg":
-            return IcebergRegistry(ImpalaSettings())
-        case "file":
-            return FileRegistry(settings.registry_file_path)
-        case "env":
-            return EnvRegistry()
-        case _:
-            raise ValueError(f"Unknown REGISTRY_BACKEND: {settings.registry_backend!r}")
+    backend = settings.registry_backend
+    if backend == "iceberg":
+        return IcebergRegistry(ImpalaSettings())
+    if backend == "file":
+        return FileRegistry(settings.registry_file_path)
+    if backend == "env":
+        return EnvRegistry()
+    raise ValueError(f"Unknown REGISTRY_BACKEND: {backend!r}")
