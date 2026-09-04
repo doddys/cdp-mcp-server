@@ -10,6 +10,7 @@ import json
 import os
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -20,6 +21,7 @@ from cdp_mcp.clients.oozie_client import OozieNotFoundError
 from cdp_mcp.clients.spark_client import SparkNotFoundError
 from cdp_mcp.clients.yarn_client import YarnNotFoundError
 from cdp_mcp.cm_pool import CMPool
+from cdp_mcp.collector import jobs as collector_jobs
 from cdp_mcp.config import ServerSettings, build_registry
 
 log = structlog.get_logger(__name__)
@@ -1725,6 +1727,98 @@ async def list_oozie_jobs(
         return _spnego_error("Oozie")
     except Exception as exc:
         return _dump({"error": f"Oozie error: {exc}"})
+
+
+@mcp.tool()
+async def trigger_collection(
+    cluster_name: str,
+    period_start: str,
+    period_end: str,
+    services: str | None = None,
+    skip_downstream: bool = False,
+    period_label: str | None = None,
+    cluster_hint: str | None = None,
+) -> str:
+    """
+    Trigger an offline collector run (cdp-collect) for a cluster and period.
+    Returns immediately with a job_id — poll get_collection_status(job_id)
+    until state is "done" or "failed". A full month can take 10–30 minutes;
+    the collection runs in the background on the server's event loop, so
+    other tool calls are still serviced while it runs.
+
+    When done, the status response carries a download_url (an https:// URL
+    to a .tar.gz of the collected raw/ directory). Fetch it with curl/your
+    HTTP client, NOT through this MCP tool — the tarball is binary and can
+    be tens of MB, far above the MCP tool-result cap. The download is gated
+    by the X-Gateway-Token header (same as the /alias-svc/* endpoints).
+
+    One collection runs at a time against the shared CM pool/tunnel; a
+    second trigger while one is running returns state="busy" with the
+    running job_id to poll.
+
+    Args:
+      cluster_name:    Cluster name as known to the CM registry.
+      period_start:    ISO 8601 start (e.g. 2026-08-01T00:00:00Z, or +07:00).
+      period_end:      ISO 8601 end (inclusive day: 23:59:59, not next 00:00:00).
+      services:        Comma-separated service names to restrict to (default: all).
+      skip_downstream: Skip YARN/Spark/HDFS/Oozie (CM-only). Use if downstream
+                       services aren't installed or Kerberos isn't set up.
+      period_label:    Human label for _manifest.json (default: from period_start).
+      cluster_hint:    Short slug for _manifest.json (e.g. "astra_daas_drc").
+
+    WARNING: This is a heavy, non-idempotent operation — it runs a full-cluster
+    scrape for the requested period through the shared CM tunnel.
+    """
+    if _pool is None:
+        return _no_client(cluster_name)
+    collect_root = Path(os.environ.get("COLLECTOR_COLLECT_ROOT", "/var/lib/cdp-mcp/collect"))
+    exports_dir = Path(os.environ.get("COLLECTOR_EXPORTS_DIR", "/var/lib/cdp-mcp/exports"))
+    public_base_url = os.environ.get(
+        "COLLECTOR_PUBLIC_BASE_URL", "https://gateway-ai.cloud.expecc.com"
+    )
+    service_filter = set(s.strip() for s in services.split(",")) if services else None
+    try:
+        job = await collector_jobs.start_collection(
+            _pool,
+            cluster_name,
+            period_start,
+            period_end,
+            services=service_filter,
+            skip_downstream=skip_downstream,
+            period_label=period_label,
+            cluster_hint=cluster_hint,
+            collect_root=collect_root,
+            exports_dir=exports_dir,
+            public_base_url=public_base_url,
+        )
+        return _dump(job.to_dict())
+    except Exception as exc:
+        return _dump({"error": f"Failed to start collection: {exc}"})
+
+
+@mcp.tool()
+async def get_collection_status(job_id: str) -> str:
+    """
+    Poll the status of a collection triggered by trigger_collection().
+    Returns state ("running" | "done" | "failed" | "busy"), timing, a
+    manifest summary (file_count, truncated/not_available files), and — when
+    done — the download_url for the .tar.gz result. Fetch the download_url
+    with curl, not through MCP.
+
+    Args:
+      job_id: Job ID returned by trigger_collection().
+    """
+    job = collector_jobs.get_job(job_id)
+    if job is None:
+        return _dump(
+            {
+                "error": f"No collection job with id '{job_id}'. "
+                "Job state is in-memory; a server restart clears it. "
+                "If the tarball was already produced, it may still be on "
+                "disk under the exports directory."
+            }
+        )
+    return _dump(job.to_dict())
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

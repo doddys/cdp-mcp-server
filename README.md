@@ -158,6 +158,9 @@ error, what now?") are in [docs/tools.md](docs/tools.md). Summary below.
 - `get_oozie_job` — Get workflow or coordinator job details
 - `list_oozie_jobs` — List Oozie jobs with filters
 
+### Offline Collector
+- `trigger_collection` / `get_collection_status` — Trigger a background `cdp-collect` run for a cluster + period and poll until done; the result is a `.tar.gz` downloaded over HTTPS (not returned through the MCP tool, which is size-capped)
+
 YARN/Spark/HDFS/Oozie endpoints are auto-discovered from CM at startup and connected
 to over HTTPS automatically when the role's config reports a TLS port (see
 `cm_pool.py`); no manual scheme/port configuration is needed for TLS-enabled clusters.

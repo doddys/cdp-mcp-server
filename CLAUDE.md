@@ -480,6 +480,65 @@ Validated end-to-end against a real production cluster (Astra DaaS DRC,
 Kerberized, reached via a SOCKS5 tunnel + in-process keytab acquisition) —
 not just mocked.
 
+### Triggering the collector via MCP (implemented)
+`server.py` exposes two tools that run the collector in-process on the MCP
+server's event loop, so an MCP client can trigger a collection and fetch the
+result without SSH access to the VPS:
+
+- `trigger_collection(cluster, period_start, period_end, ...)` → returns a
+  `job_id` immediately (the collection runs as a background `asyncio.create_task`,
+  not a blocking tool call).
+- `get_collection_status(job_id)` → polls `state` (`running`/`done`/`failed`/
+  `busy`); when `done`, carries a `download_url` (https `.tar.gz` of the
+  collected `raw/` directory).
+
+**Why async trigger/poll, not a blocking tool:** a full-month collection takes
+10–30 minutes and produces tens of MB. MCP tool results are JSON capped at
+~1MB (rule 7) — a blocking "collect and return" would hit the same wall that
+killed the 17MB `get_host_metrics` call live. The shape mirrors the existing
+`run_service_command` → `get_command_status` pair.
+
+**Executor — in-process, reusing `_pool` (Option A).** The collector is
+async-I/O-bound (httpx through the SOCKS tunnel), so it coexists with MCP
+request handling on the same event loop: other tool calls are serviced at
+every `await` — a 4-minute collection does **not** block a concurrent
+`list_clusters` or `get_service_logs`. `collect_cluster(_pool, ...)` reuses
+the live `CMPool`/tunnel/keytab — no second registry build. The job registry
+(`collector/jobs.py`) is module-level in-memory state, like `_pool`; a daemon
+restart kills any running job and orphans its entry (honest "not found" on
+poll, not a stale "running"). A `Semaphore(1)` limits to **one collection at
+a time** against the shared pool/tunnel — a second trigger returns `busy`
+with the running `job_id` to poll, rather than queueing silently. The
+collector's own internal semaphore still bounds per-host concurrency.
+
+**Download — nginx static `/exports/`, NOT through MCP.** The tarball is
+binary and can be tens of MB; it must not flow through an MCP tool result nor
+through the mask proxy (`:8100`, JSON-RPC-aware — it mangles non-JSON). On
+completion, `jobs.py` tars the out dir to `$COLLECTOR_EXPORTS_DIR/<job_id>.tar.gz`;
+nginx serves `location /exports/` from that dir, gated by the **same
+`X-Gateway-Token` nginx map** (`$alias_svc_gateway_ok`) that protects
+`/alias-svc/*`. The status tool returns the `https://` URL; the caller fetches
+it with `curl`, not through MCP. nginx streams + range-requests natively.
+Config: `COLLECTOR_EXPORTS_DIR` (default `/var/lib/cdp-mcp/exports`),
+`COLLECTOR_PUBLIC_BASE_URL` (default `https://gateway-ai.cloud.expecc.com`),
+`COLLECTOR_COLLECT_ROOT` (default `/var/lib/cdp-mcp/collect`) — all read from
+env at tool-call time so the code works locally without them.
+
+**This is a mutating tool.** Per rule 4 (read-mostly), `trigger_collection`
+is flagged with a WARNING in its docstring and is the explicit sign-off for
+the heavy, non-idempotent full-cluster scrape. The download is gated by
+`X-Gateway-Token`; gating the *trigger* is the deployment's job (LiteLLM/
+nginx), same as the existing mutating tools (`run_service_command`,
+`update_config`).
+
+**Dependency direction stays server → collector.** `jobs.py` lives in
+`collector/` and imports `collect_cluster`/`Manifest` only — never `server.py`
+or `mcp`. `server.py` imports `jobs`. The collector subpackage's "never
+imports `mcp`/`server`" invariant is preserved; a 3.8 collector bundle that
+ships `jobs.py` unused still imports cleanly (`from __future__ import
+annotations` keeps the `dict[str, ...]`/`str | None` annotations lazy, and
+the `UTC = timezone.utc` alias matches `collect.py`'s 3.8-compat pattern).
+
 ## TO-DO: incremental collector
 The collector is currently a **full-period re-collect** per run: every
 entity in the period is fetched from scratch, and resume (`_manifest.json`)

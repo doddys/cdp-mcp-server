@@ -162,6 +162,22 @@
 | `get_oozie_job` | Workflow or coordinator job details with action list and YARN app IDs |
 | `list_oozie_jobs` | List jobs filtered by status / type / user |
 
+## Offline Collector Tools
+
+| Tool | Description |
+|---|---|
+| `trigger_collection` | Trigger a background `cdp-collect` run for a cluster + period; returns a `job_id` immediately (mutating — heavy full-cluster scrape) |
+| `get_collection_status` | Poll a collection job's state (`running`/`done`/`failed`/`busy`); when done, carries the `download_url` for the `.tar.gz` result |
+
+`trigger_collection` runs the collector in-process on the server's event loop
+(reusing the shared CM pool/tunnel) and returns immediately with a `job_id` —
+poll `get_collection_status` until `state` is `done` or `failed`. A full month
+can take 10–30 minutes; other tool calls are still serviced while it runs. One
+collection runs at a time — a second trigger returns `busy`. When done, fetch
+the `download_url` with `curl` (not through MCP — the tarball is binary and can
+be tens of MB, above the tool-result cap); the download is gated by the
+`X-Gateway-Token` header.
+
 ---
 
 ## Diagnostic Workflows
