@@ -30,7 +30,7 @@ set -euo pipefail
 # below) -- see the guard around its install for why.
 #
 # Usage: scripts/build_collector_bundle.sh [output_dir]
-# Produces: <output_dir>/cdp-collector-<version>-<platform>.tar.gz
+# Produces: <output_dir>/cdp-collector-<version>-<platform>-py<X.Y>[-kerberos].tar.gz
 # Env vars: TARGET_PLATFORM, TARGET_PYTHON, WITH_KERBEROS (default false)
 #
 # Python 3.8-3.10 support: the wheel's metadata declares requires-python
@@ -118,7 +118,12 @@ print(out_wheel)
 PYEOF
 }
 
-BUNDLE_NAME="cdp-collector-${VERSION}-${TARGET_PLATFORM}${WITH_KERBEROS:+-kerberos}"
+# -py<X.Y> in the name: a py3.8 bundle (httpx-gssapi 0.3.1, httpx<0.28) and a
+# py3.12 bundle (0.6.x, current httpx) differ in more than platform -- keep
+# them from being mistaken for each other at the client site, and from
+# overwriting each other in dist/ (they previously collided when both were
+# built without -kerberos).
+BUNDLE_NAME="cdp-collector-${VERSION}-${TARGET_PLATFORM}-py${TARGET_PYTHON}${WITH_KERBEROS:+-kerberos}"
 
 BUILD_DIR="$(mktemp -d)"
 BUNDLE_DIR="$BUILD_DIR/$BUNDLE_NAME"
@@ -134,9 +139,15 @@ cd "$REPO_ROOT"
 # building on a fresh VPS checkout). Version matches the Quick Setup section
 # of CLAUDE.md; only the interpreter is needed here, not the project's own
 # runtime deps, since this .venv exists solely to run the build backend.
-if [ ! -x "$REPO_ROOT/.venv/bin/python" ]; then
-    echo "==> No .venv found -- bootstrapping one (uv venv --python 3.12)"
-    uv venv --python 3.12
+# --clear: a .venv left by a PREVIOUS containerized build in this same
+# mounted repo (e.g. a py3.8 run followed by py3.12, or vice versa) is
+# foreign -- uv venv refuses to replace a non-empty venv, and a
+# mismatched-interpreter leftover breaks uv build below. Always recreate;
+# on a dev machine this throws away a working `uv sync` venv, but the
+# build only needs the interpreter, not installed deps.
+if ! "$REPO_ROOT/.venv/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 12)' 2>/dev/null; then
+    echo "==> Bootstrapping .venv (uv venv --python 3.12 --clear)"
+    uv venv --python 3.12 --clear
 fi
 
 echo "==> Building cdp-mcp wheel"
@@ -337,6 +348,30 @@ Nothing in this bundle masks hostnames/IPs before they leave the network --
 treat the output directory as sensitive and control who/what can access it
 in transit.
 EOF
+
+# 3.8+Kerberos bundles ship httpx-gssapi 0.3.1 (0.4 dropped 3.8), which
+# predates 0.5's "use the SPNEGO mechanism by default" change. Against a
+# standard MIT krb5 KDC the two negotiate identically, but against an
+# Active Directory KDC the older default (krb5 mechanism) has historically
+# caused interop friction. Append a targeted caveat to the bundle's own
+# README (after the quoted heredoc above, so nothing in it can expand) so
+# an operator at the client site knows to try the py3.12 bundle first
+# (httpx-gssapi 0.6.x, SPNEGO-by-default) if the environment uses AD.
+if [ "$WITH_KERBEROS" = "true" ] && [ "$TARGET_PYTHON" = "3.8" ]; then
+    cat >> "$BUNDLE_DIR/README.md" <<'CAVEAT'
+
+## Active Directory environments
+This 3.8 bundle ships httpx-gssapi 0.3.1 (the last release supporting
+Python 3.8; 0.4 dropped it). That version predates httpx-gssapi 0.5's
+switch to the SPNEGO mechanism by default and negotiates with the plain
+krb5 mechanism instead. Against a standard MIT krb5 KDC the two behave
+identically; against an **Active Directory** KDC the older default has
+historically caused mechanism-negotiation failures. If SPNEGO
+authentication errors occur here and the site runs AD, prefer the py3.12
+bundle (httpx-gssapi 0.6.x, SPNEGO-by-default) on a host with Python 3.12.
+CAVEAT
+fi
+
 
 echo "==> Packaging tarball"
 mkdir -p "$OUT_DIR"

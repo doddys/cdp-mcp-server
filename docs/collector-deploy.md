@@ -43,6 +43,13 @@ transfer.
 Python 3.8 + Kerberos note: `httpx-gssapi` 0.4 dropped 3.8, so those builds
 pin `httpx-gssapi==0.3.1` (last 3.8-capable release) with `httpx<0.28`.
 Both support the `HTTPSPNEGOAuth(creds=...)` keytab path `spnego.py` uses.
+**If the client's KDC is Active Directory, prefer the py3.12 bundle** —
+0.3.1 predates httpx-gssapi 0.5's switch to SPNEGO-by-default and
+negotiates with the plain krb5 mechanism, which has historically caused
+interop friction against AD (the 3.8 bundle's README carries this caveat
+too). Bundle filenames embed the Python version
+(`…-py3.8-kerberos.tar.gz` vs `…-py3.12-kerberos.tar.gz`) so the two
+can't be mistaken for each other.
 
 ### What's inside
 

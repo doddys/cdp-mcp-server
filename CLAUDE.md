@@ -464,7 +464,12 @@ though the wheel's metadata says `requires-python >=3.11` (that floor is
 the MCP server's, not the collector's): the build rewrites the wheel's
 `Requires-Python`, vendors `eval_type_backport` for pydantic's `X | Y`
 annotations on old interpreters, and — for 3.8 + Kerberos — pins
-`httpx-gssapi==0.3.1` (0.4 dropped 3.8) with `httpx<0.28`. When building a
+`httpx-gssapi==0.3.1` (0.4 dropped 3.8) with `httpx<0.28`. **AD-KDC
+client sites should use the py3.12 Kerberos bundle** — 0.3.1 predates
+httpx-gssapi 0.5's SPNEGO-mechanism-by-default and negotiates plain krb5,
+which has historically misbehaved against Active Directory. Bundle names
+embed the target Python (`-py3.8-`/`-py3.12-`) so versions aren't
+confused at the client site. When building a
 Kerberos bundle inside the Docker recipe, the gssapi C extension must
 compile against a `TARGET_PYTHON` interpreter, so the container's
 `python:<TARGET_PYTHON>-slim` system python is used for that step (the
