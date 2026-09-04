@@ -264,20 +264,30 @@ async def get_service_logs(
     max_lines: int = 500,
     role_name: str | None = None,
     max_roles: int = 10,
+    keyword: str | None = None,
 ) -> str:
     """
     Retrieve recent log lines for role(s) of a service.
     Returns a dict mapping role_name → list of log lines.
     Useful for diagnosing service failures.
 
-    CM has no server-side way to limit log size -- each role fetch always
-    transfers the complete log file (can be tens of MB); max_lines only
-    trims what's returned, not what's downloaded. Without role_name, this
-    fetches every role of the service -- on services with many roles (e.g.
-    HDFS with many DataNodes) that can take minutes. Prefer passing
-    role_name (from list_roles()) once you know which host/role is
+    CM has no server-side way to limit log size or filter by keyword -- each
+    role fetch always transfers the complete log file (can be tens of MB);
+    max_lines only trims what's returned, not what's downloaded. Without
+    role_name, this fetches every role of the service -- on a service with
+    many roles (e.g. HDFS with many DataNodes) that can take minutes. Prefer
+    passing role_name (from list_roles()) once you know which host/role is
     relevant. Unfiltered calls are capped at max_roles (default 10);
     GATEWAY roles are always skipped since they have no logs.
+
+    When `keyword` is set, the full log text is filtered case-insensitively
+    and the last `max_lines` matching lines are returned (not the last N
+    lines of the whole log filtered after the fact -- that would silently
+    drop older matches). If a role has more matches than max_lines returns,
+    a "{role_name}_keyword_truncated" entry records the full match count so
+    the caller knows to raise max_lines or narrow the time range. When
+    keyword is unset, the behavior is the plain tail-trim (last max_lines
+    lines).
 
     Args:
       cluster_name: Cluster name.
@@ -285,6 +295,9 @@ async def get_service_logs(
       max_lines:    Maximum log lines per role (default 500).
       role_name:    Fetch logs for just this one role (from list_roles()).
       max_roles:    Cap on roles fetched when role_name is not given (default 10).
+      keyword:      Case-insensitive substring filter. When set, returns the
+                    last max_lines matching lines per role instead of the
+                    last max_lines lines overall.
     """
     client = _pool.get_client_for_cluster(cluster_name)
     if client is None:
@@ -294,6 +307,7 @@ async def get_service_logs(
             await client.get_service_logs(
                 cluster_name, service_name, max_lines,
                 role_name=role_name, max_roles=max_roles,
+                keyword=keyword,
             )
         )
     except Exception as exc:

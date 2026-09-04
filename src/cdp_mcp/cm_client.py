@@ -685,24 +685,34 @@ class ClouderaManagerClient:
         max_lines: int = 500,
         role_name: str | None = None,
         max_roles: int = 10,
+        keyword: str | None = None,
     ) -> dict[str, list[str]]:
         """
         Retrieve logs for role(s) of a service in parallel (max 5 concurrent).
         Returns a dict of {role_name: [log_lines]}.
 
         CM's /logs/full has no documented or functional server-side line
-        limit (verified empirically -- it returns the complete log file,
-        which can be tens of MB, no matter what query params are sent), so
-        each role fetch always transfers the full log over the network;
-        max_lines only bounds what's kept after the fact, not the transfer
-        itself. Without role_name, this fetches every role of the service --
-        on a service with many roles (e.g. HDFS with dozens of DataNodes)
-        that's dozens of full-log transfers and can make a single call take
-        minutes. GATEWAY roles are skipped by default since they have no
-        daemon/log file (confirmed: CM returns 404 for them). When no
-        role_name is given, the (post-GATEWAY-filter) role list is capped at
-        max_roles; a "_truncated" marker is added to the result so the
-        caller knows to narrow with role_name or raise max_roles explicitly.
+        limit or keyword filter (verified empirically -- it returns the
+        complete log file, which can be tens of MB, no matter what query
+        params are sent; grep=/query=/search=/filter=/contains=/text= are all
+        silently ignored), so each role fetch always transfers the full log
+        over the network. When `keyword` is None, max_lines bounds what's
+        kept after the fact -- the last max_lines lines (a tail-trim). When
+        `keyword` is set, the full text is filtered case-insensitively FIRST,
+        then the matches bounded to the last max_lines of them -- so a
+        keyword matching older lines isn't silently dropped by the tail-trim,
+        which is the failure mode of filtering after trimming. Without
+        role_name, this fetches every role of the service -- on a service
+        with many roles (e.g. HDFS with dozens of DataNodes) that's dozens
+        of full-log transfers and can make a single call take minutes.
+        GATEWAY roles are skipped by default since they have no daemon/log
+        file (confirmed: CM returns 404 for them). When no role_name is
+        given, the (post-GATEWAY-filter) role list is capped at max_roles; a
+        "_truncated" marker is added to the result so the caller knows to
+        narrow with role_name or raise max_roles explicitly. When keyword is
+        set and a role has more matches than max_lines returns, a
+        "{role_name}_keyword_truncated" entry records the full match count so
+        the caller can raise max_lines or narrow the time range.
         """
         roles_data = await self._get(
             f"/clusters/{cluster_name}/services/{service_name}/roles"
@@ -735,14 +745,35 @@ class ClouderaManagerClient:
             async with semaphore:
                 try:
                     # /logs/full has no documented (or functional -- verified
-                    # empirically) server-side line limit; it always returns the
-                    # complete log file regardless of any query param. Fetch it
-                    # in full and truncate to the last max_lines client-side.
+                    # empirically) server-side line limit or keyword filter;
+                    # it always returns the complete log file regardless of
+                    # any query param. Fetch it in full, then either tail-trim
+                    # (keyword=None) or filter case-insensitively and bound the
+                    # matches (keyword set). Filtering BEFORE bounding is
+                    # deliberate: tail-trim-then-filter would silently drop
+                    # matching lines older than the last N, which is a
+                    # correctness problem, not just a size one.
                     text = await self._get_text(
                         f"/clusters/{cluster_name}/services/{service_name}"
                         f"/roles/{role_name}/logs/full"
                     )
-                    result[role_name] = text.splitlines()[-max_lines:]
+                    if keyword is None:
+                        result[role_name] = text.splitlines()[-max_lines:]
+                    else:
+                        needle = keyword.lower()
+                        matches = [
+                            line for line in text.splitlines()
+                            if needle in line.lower()
+                        ]
+                        total_matches = len(matches)
+                        result[role_name] = matches[-max_lines:]
+                        if total_matches > max_lines:
+                            result[f"{role_name}_keyword_truncated"] = [
+                                f"{total_matches} lines matched '{keyword}' "
+                                f"in {role_name}; returning the last "
+                                f"{max_lines}. Raise max_lines or narrow the "
+                                "time range to see older matches."
+                            ]
                 except CMNotFoundError:
                     log.debug(
                         "cm_client.role_log_not_found",

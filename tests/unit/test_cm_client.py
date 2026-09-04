@@ -728,6 +728,82 @@ async def test_get_service_logs_truncates_client_side(client):
     assert route.calls[0].request.url.params == httpx.QueryParams()
 
 
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_service_logs_keyword_filters_and_bounds(client):
+    """keyword filters the full text case-insensitively first, then bounds
+    to the last max_lines matches -- so a match older than the tail-trim
+    window is still returned (the failure mode of trim-then-filter)."""
+    roles = [{"name": "nn1", "type": "NAMENODE"}]
+    respx.get(f"{BASE}/clusters/My%20Cluster/services/hdfs/roles").mock(
+        return_value=httpx.Response(200, json={"items": roles})
+    )
+    # 10 lines: ERROR at index 0 and 9, error (lowercase) at index 5.
+    lines = [f"line {i}" for i in range(8)]
+    lines[0] = "ERROR boom"
+    lines[5] = "something errored here"
+    lines[7] = "ERROR final"
+    respx.get(
+        f"{BASE}/clusters/My%20Cluster/services/hdfs/roles/nn1/logs/full"
+    ).mock(return_value=httpx.Response(200, text="\n".join(lines)))
+
+    # max_lines=2 with keyword ERROR: matches are indices 0, 5, 7 -> last 2
+    result = await client.get_service_logs(
+        "My Cluster", "hdfs", max_lines=2, keyword="ERROR"
+    )
+
+    assert result["nn1"] == ["something errored here", "ERROR final"]
+    assert "nn1_keyword_truncated" in result
+    assert result["nn1_keyword_truncated"][0].startswith("3 lines matched 'ERROR'")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_service_logs_keyword_under_limit_no_truncation_marker(client):
+    """When keyword matches <= max_lines, no _keyword_truncated marker."""
+    roles = [{"name": "nn1", "type": "NAMENODE"}]
+    respx.get(f"{BASE}/clusters/My%20Cluster/services/hdfs/roles").mock(
+        return_value=httpx.Response(200, json={"items": roles})
+    )
+    full_log = "\n".join(
+        ["INFO start", "ERROR one", "INFO middle", "ERROR two", "INFO end"]
+    )
+    respx.get(
+        f"{BASE}/clusters/My%20Cluster/services/hdfs/roles/nn1/logs/full"
+    ).mock(return_value=httpx.Response(200, text=full_log))
+
+    result = await client.get_service_logs(
+        "My Cluster", "hdfs", max_lines=10, keyword="error"
+    )
+
+    assert result["nn1"] == ["ERROR one", "ERROR two"]
+    assert "nn1_keyword_truncated" not in result
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_service_logs_keyword_none_preserves_tail_trim(client):
+    """keyword=None must be byte-for-byte the old behavior: last max_lines."""
+    roles = [{"name": "nn1", "type": "NAMENODE"}]
+    respx.get(f"{BASE}/clusters/My%20Cluster/services/hdfs/roles").mock(
+        return_value=httpx.Response(200, json={"items": roles})
+    )
+    full_log = "\n".join(f"line {i}" for i in range(1000))
+    respx.get(
+        f"{BASE}/clusters/My%20Cluster/services/hdfs/roles/nn1/logs/full"
+    ).mock(return_value=httpx.Response(200, text=full_log))
+
+    result_none = await client.get_service_logs(
+        "My Cluster", "hdfs", max_lines=5, keyword=None
+    )
+    result_default = await client.get_service_logs(
+        "My Cluster", "hdfs", max_lines=5
+    )
+
+    assert result_none["nn1"] == [f"line {i}" for i in range(995, 1000)]
+    assert result_default["nn1"] == result_none["nn1"]
+
+
 def _event(i: int, cluster: str = "My Cluster") -> dict:
     return {
         "timeOccurred": f"2026-01-01T00:{i:02d}:00Z",
