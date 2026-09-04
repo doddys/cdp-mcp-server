@@ -105,7 +105,7 @@ error, what now?") are in [docs/tools.md](docs/tools.md). Summary below.
 - `list_clusters` — List all managed DataHub clusters
 - `list_services` — List services on a cluster
 - `get_service` — Single-service detail (health, config staleness)
-- `list_roles` / `get_role_status` — Role-level status for a service, or one role in detail
+- `list_roles` / `get_role_status` — Role-level status listing for a service, or detailed status for one role
 - `get_service_logs` — Extract recent log lines for one role or a service's roles (see note below)
 - `get_alerts` — Get cluster alerts and events
 - `get_service_metrics` / `get_host_metrics` — Time-series metrics via tsquery, per-service or per-host
@@ -124,6 +124,7 @@ error, what now?") are in [docs/tools.md](docs/tools.md). Summary below.
 - `refresh_cluster_map` — Rebuild cluster→CM mapping
 - `get_mgmt_service` — CM Management Service health (Host Monitor, Service Monitor, etc.)
 - `delete_service` / `delete_role` — Remove a stale service/role — **irreversible**
+- `get_hdfs_snapshots` — List snapshots of an HDFS directory via WebHDFS (read-only; HA failover to the active NameNode)
 
 > **`get_service_logs` note:** the CM `/logs/full` endpoint has no server-side line
 > limit — it always returns the complete log file (can be tens of MB), which cdp-mcp
@@ -168,6 +169,41 @@ to over HTTPS automatically when the role's config reports a TLS port (see
 | `file` | Development, small teams | `cm_instances.yaml` |
 | `env` | Single CM, quick tests | env vars `CM_HOST`, `CM_USERNAME`, `CM_PASSWORD` |
 | `iceberg` | Production CDP environments | Impala/HiveServer2 + Iceberg table |
+
+## Offline collector (`cdp-collect`)
+
+For clusters an AI assistant **cannot reach** directly — air-gapped networks,
+restricted client networks, or CM behind a jump host with no MCP route out —
+`cdp-collect` is a standalone, LLM-free collector that calls Cloudera
+Manager's REST API directly (plus YARN/Spark/HDFS/Oozie where installed) and
+writes **full-resolution** JSON to local files. It skips the
+`MAX_TIMESERIES_POINTS` cap that exists only to keep MCP tool results under
+the transport's ~1 MB limit — irrelevant when writing to disk. The output
+matches cdp-report's interactive export exactly (`NN_<name>.json` files +
+`_manifest.json` with per-file sha256), so cdp-report's curate/render phases
+can run against the `--out` directory directly, with no conversion step.
+
+It's a separate entry point (`cdp-collect`, imports only `cm_pool`/`clients`/
+`registry`/`config` — never `server.py`/`mcp`), resumable per entity, and
+honest about failures: a failed call writes `{"status": "not_available"}`
+(retried on resume) rather than nothing at all.
+
+```bash
+# Run directly from a checkout (dev/smoke)
+REGISTRY_BACKEND=file .venv/bin/cdp-collect --cluster "my-cluster" \
+  --period-start 2026-08-01T00:00:00+07:00 \
+  --period-end   2026-08-31T23:59:59+07:00 --out output/my-cluster_202608/
+```
+
+For a client site with no internet/PyPI, `scripts/build_collector_bundle.sh`
+packages the collector plus only its runtime deps (excludes `mcp` and the
+Iceberg-only `impyla`/`thrift*`) as an offline-installable tarball — only a
+matching system `python3` is needed at the site. Bundle names embed the
+target Python (`-py3.8-` / `-py3.12-`) so versions aren't confused; Kerberos
+bundles (`WITH_KERBEROS=true`) vendor `httpx-gssapi` for SPNEGO and must be
+built on a host matching `TARGET_PLATFORM` (gssapi has no prebuilt wheel).
+
+Full build → deploy → collect → handoff runbook: **[docs/collector-deploy.md](docs/collector-deploy.md)**.
 
 ## Kerberos / SPNEGO
 

@@ -480,5 +480,66 @@ Validated end-to-end against a real production cluster (Astra DaaS DRC,
 Kerberized, reached via a SOCKS5 tunnel + in-process keytab acquisition) —
 not just mocked.
 
+## TO-DO: incremental collector
+The collector is currently a **full-period re-collect** per run: every
+entity in the period is fetched from scratch, and resume (`_manifest.json`)
+only skips entities already recorded as a successful *full* result — it does
+not reuse prior data to fetch only what's new. Re-running the same month
+re-pulls the entire month; re-running an adjacent month re-pulls both in
+full. On a cluster with months of history, this is bandwidth- and
+time-wasteful for repeat/adjacent runs, and means a period's data can never
+be "topped up" with the latest days without redoing the whole range.
+
+Implement an **incremental mode** so a run against a period that already has
+an `_manifest.json` fetches only the delta since the prior run's
+`generated_at`, rather than the whole period again. Sketch of the design
+(think through carefully before implementing — this is non-trivial and the
+resume/period-drift guards interact with it):
+
+- **Distinguish entity classes by how they age.** Time-series metrics
+  (host/service) and record-streams (alerts/audit/impala-queries/YARN-long
+  apps) are append-only in CM and naturally incremental — a `from`/`to` of
+  `[last_run_generated_at, period_end]` re-fetches just the new points/
+  records, then the new slice is merged into the existing file (deduped by
+  timestamp / `queryId` / `app_id`, reusing the seam-dedup and impala/YARN
+  merge logic already in `collect.py`). Snapshot entities (host status,
+  roles, services, parcels, security info, namenode status, oozie jobs,
+  replication schedules) are *current-state* reads with no time dimension —
+  these can't be incrementally merged; a repeat run should just re-fetch the
+  snapshot (cheap) or skip it if unchanged, but they're small so re-fetch is
+  fine.
+- **Manifest gains a `generated_at` + per-entity `last_collected_at`** so an
+  incremental run knows the watermark without a separate state file. The
+  existing `generated_at` at the top level is a start; per-entity timestamps
+  let one entity be re-fetched without forcing all others to be.
+- **Period drift still refuses, but narrower.** Today a different
+  `--period-*` against an existing dir is a hard error. Incremental mode
+  relaxes this for the *same* period (a top-up) but must still reject a
+  *different* period — don't let a "July top-up" silently write August data.
+  Consider a `--incremental`/`--top-up` flag to make the intent explicit
+  rather than inferring it from the manifest's existence (full re-collect
+  into an existing dir is a legitimate operation today and shouldn't become
+  implicit).
+- **Chunk-boundary interaction.** Host metrics are fetched in ≤14-day
+  sub-ranges and merged; an incremental slice near `period_end` is typically
+  one small chunk — fine — but a top-up spanning a chunk seam must dedupe
+  against the existing merged file's exact timestamps, same as today's
+  inter-chunk seam dedup. Alerts/audit are weekly-chunked; an incremental
+  slice that falls mid-week needs to re-fetch that whole week's bucket
+  (CM has no sub-week `from`/`to` for the `matched[:limit]` paging path)
+  and dedupe — the weekly granularity is a server-side constraint, not a
+  choice.
+- **`not_available` records still retried.** A prior failed entity is still
+  retried on the next run regardless of incremental mode — the cause may be
+  fixed by then (existing behaviour, keep it).
+- **Reporting caveat.** A period that's been topped up incrementally has a
+  `generated_at` newer than some of its data; cdp-report-curate/render and
+  `score_export_run.py` read counts/period, not freshness, so verify they
+  don't key off `generated_at` as a "this is the whole period" signal before
+  shipping.
+
+Not yet scoped or designed in detail — this is a placeholder for the work.
+The full-period path stays the default; incremental is an opt-in mode.
+
 ## Future language note
 The PoC is Python + FastMCP. If validated, consider rewriting in Go for distribution as a static binary.
