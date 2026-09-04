@@ -519,9 +519,9 @@ nginx serves `location /exports/` from that dir, gated by the **same
 `X-Gateway-Token` nginx map** (`$alias_svc_gateway_ok`) that protects
 `/alias-svc/*`. The status tool returns the `https://` URL; the caller fetches
 it with `curl`, not through MCP. nginx streams + range-requests natively.
-Config: `COLLECTOR_EXPORTS_DIR` (default `/var/lib/cdp-mcp/exports`),
+Config: `COLLECTOR_EXPORTS_DIR` (default `/opt/cdp-mcp/exports`),
 `COLLECTOR_PUBLIC_BASE_URL` (default `https://gateway-ai.cloud.expecc.com`),
-`COLLECTOR_COLLECT_ROOT` (default `/var/lib/cdp-mcp/collect`) — all read from
+`COLLECTOR_COLLECT_ROOT` (default `/opt/cdp-mcp/collect`) — all read from
 env at tool-call time so the code works locally without them.
 
 **This is a mutating tool.** Per rule 4 (read-mostly), `trigger_collection`

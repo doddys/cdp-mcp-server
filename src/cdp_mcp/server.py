@@ -1771,8 +1771,8 @@ async def trigger_collection(
     """
     if _pool is None:
         return _no_client(cluster_name)
-    collect_root = Path(os.environ.get("COLLECTOR_COLLECT_ROOT", "/var/lib/cdp-mcp/collect"))
-    exports_dir = Path(os.environ.get("COLLECTOR_EXPORTS_DIR", "/var/lib/cdp-mcp/exports"))
+    collect_root = Path(os.environ.get("COLLECTOR_COLLECT_ROOT", "/opt/cdp-mcp/collect"))
+    exports_dir = Path(os.environ.get("COLLECTOR_EXPORTS_DIR", "/opt/cdp-mcp/exports"))
     public_base_url = os.environ.get(
         "COLLECTOR_PUBLIC_BASE_URL", "https://gateway-ai.cloud.expecc.com"
     )
