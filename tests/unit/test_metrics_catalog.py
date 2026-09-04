@@ -64,6 +64,18 @@ def test_resolve_curated_kafka_names_present():
     assert "kafka_under_replicated_partitions_across_kafka_brokers" in missing
 
 
+def test_kafka_curated_list_includes_reviewed_additions():
+    kafka_names = set(metrics_catalog.CURATED_SERVICE_METRICS["KAFKA"])
+    added = {
+        "kafka_network_processor_avg_idle_across_kafka_brokers",
+        "kafka_groups_preparing_rebalance_across_kafka_brokers",
+        "kafka_groups_completing_rebalance_across_kafka_brokers",
+        "kafka_max_replication_lag_across_kafka_brokers",
+        "kafka_offline_replica_count_across_kafka_brokers",
+    }
+    assert added <= kafka_names
+
+
 def test_resolve_curated_hbase_and_phoenix_names_present():
     hbase_resolved, _ = metrics_catalog.resolve_curated(
         "hbase", {"compaction_queue_size_across_regionservers"}

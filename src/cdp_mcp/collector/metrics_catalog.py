@@ -24,8 +24,15 @@ Two tiers, resolved against a specific cluster's live CM metric schema
      misses them; finding these required searching by JMX vocabulary
      (compaction/memstore/requests_/isr_shrinks/etc.) and filtering by
      `sources` containing the actual role type (KAFKA/REGIONSERVER/HBASE/
-     MASTER), not by service-name substring. phoenix's CM-native monitoring
-     is limited to generic Query Server process/health metrics (cpu/mem/fd/
+     MASTER), not by service-name substring. Confirmed absent from this same
+     schema, checked deliberately rather than assumed missing: a Kafka
+     broker TCP/open-connection-count metric -- searched name_contains=
+     "connection"/"open_connections"/"socket"/"tcp"/"connections_count"/
+     "connection_creation"/"connection_close", zero Kafka-scoped matches for
+     any of them, even though Kafka's own JMX exposes connection-count; CM's
+     Kafka CSD apparently just doesn't surface it as a monitored metric.
+     phoenix's CM-native monitoring is limited to generic Query Server
+     process/health metrics (cpu/mem/fd/
      health/events) -- no query-level or throughput metrics were found in
      the schema at all, unlike Impala's list_impala_queries which has its
      own dedicated CM API. Once a real site with one of these services runs
@@ -95,16 +102,27 @@ CURATED_SERVICE_METRICS: dict[str, list[str]] = {
         # factor / minimum in-sync replica count.
         "kafka_under_replicated_partitions_across_kafka_brokers",
         "kafka_under_min_isr_partition_count_across_kafka_brokers",
-        # Stability trend -- frequent ISR churn or unclean leader elections
-        # indicate broker instability or network issues, not just noise.
+        "kafka_offline_replica_count_across_kafka_brokers",
+        "kafka_max_replication_lag_across_kafka_brokers",
+        # Stability trend -- frequent ISR churn, unclean leader elections, or
+        # consumer groups stuck rebalancing indicate broker/client
+        # instability, not just noise. No single "rebalance rate" metric
+        # exists in CM's Kafka schema -- these two group-state gauges
+        # (counts of groups currently mid-rebalance) are the closest real
+        # signal; meaningful together, not individually.
         "kafka_isr_shrinks_rate_across_kafka_brokers",
         "kafka_unclean_leader_elections_rate_across_kafka_brokers",
+        "kafka_groups_preparing_rebalance_across_kafka_brokers",
+        "kafka_groups_completing_rebalance_across_kafka_brokers",
         # Throughput.
         "kafka_produce_requests_rate_across_kafka_brokers",
         "kafka_fetch_consumer_requests_rate_across_kafka_brokers",
-        # Saturation -- request-handler thread pool idle percentage nearing
-        # zero is the standard Kafka broker capacity-headroom signal.
+        # Saturation -- request-handler and network-processor thread pools
+        # are two DIFFERENT idle-thread signals (request handling vs. network
+        # I/O), both standard Kafka broker capacity-headroom indicators, not
+        # redundant with each other.
         "kafka_request_handler_avg_idle_rate_across_kafka_brokers",
+        "kafka_network_processor_avg_idle_across_kafka_brokers",
         # Capacity/inventory context for topic/partition growth trends.
         "kafka_global_topic_count_across_kafka_brokers",
         "kafka_global_partition_count_across_kafka_brokers",
