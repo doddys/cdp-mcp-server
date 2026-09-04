@@ -117,6 +117,7 @@ src/cdp_mcp/
 │   └── spnego.py        ← lazy httpx-gssapi SPNEGO auth factory (optional [kerberos] extra)
 └── collector/            ← standalone offline collector (cdp-collect) — see § below
     ├── collect.py        ← orchestration + CLI; never imports server.py/mcp
+    ├── jobs.py           ← in-process job registry for the MCP trigger tools
     ├── manifest.py        ← _manifest.json schema + checksums
     └── metrics_catalog.py ← curated/discovery metric names per service type
 

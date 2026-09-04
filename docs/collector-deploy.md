@@ -17,6 +17,21 @@ mirror cdp-report's interactive export exactly, so cdp-report's Phase 1.5+
 tooling (curate/render, `score_export_run.py`) can run against the
 collector's `--out` directory directly, with no conversion step.
 
+There are **two ways to run the collector**, both producing the same
+`_manifest.json`-rooted output tree:
+
+1. **Standalone bundle** (§ 1–4 below) — build a tarball, carry it into a
+   restricted network, run `cdp-collect` by hand or cron. No MCP server
+   involved. Use this when the collection host has no `cdp-mcp` server, or
+   for air-gapped sites an LLM client can't reach at all.
+2. **MCP trigger** (§ 5 below) — run the collector in-process on an
+   existing `cdp-mcp` server (e.g. the VPS), triggered by the
+   `trigger_collection` / `get_collection_status` MCP tools, with the
+   result downloaded over HTTPS. No bundle to build; reuses the server's
+   already-built CM pool, SOCKS tunnel, and Kerberos keytab. Use this when
+   a `cdp-mcp` server already has cluster access and an MCP client just
+   needs to kick off a collection and pull the tarball.
+
 ---
 
 ## 1. Build the bundle (internet-connected machine)
@@ -253,3 +268,129 @@ follow the client's data-handling policy for what may leave.
 | Import error on `gssapi` at client site | Kerberos bundle was built on a mismatched platform — rebuild via the Docker recipe in § 1. |
 | `truncated: true` in an alerts/audit file | That chunk matched more events than the collector's per-file cap; the manifest's `total_matched_in_range` records how many. |
 | Metrics coarse (6h spacing) | Expected if host metrics were fetched as one full-period call — the collector avoids this via ≤14-day chunks; check you're on a current bundle. |
+
+---
+
+## 5. MCP-triggered collection (in-process on a `cdp-mcp` server)
+
+When a `cdp-mcp` server already has cluster access (CM credentials, SOCKS
+tunnel, Kerberos keytab all configured via its `cm_instances.yaml` + systemd
+unit), an MCP client can trigger a collection through two tools and download
+the result over HTTPS — no bundle, no SSH to the collection host, no separate
+`cdp-collect` process. The collector runs as a background `asyncio.create_task`
+on the server's event loop, reusing the live `CMPool`; other MCP tool calls
+are still serviced while it runs (the collector is I/O-bound httpx, so every
+`await` is a yield point).
+
+### Tools
+
+- `trigger_collection(cluster_name, period_start, period_end, services?,
+  skip_downstream?, period_label?, cluster_hint?)` → returns a `job_id`
+  immediately with `state="running"`. **Mutating** (heavy full-cluster
+  scrape) — flagged with a WARNING in its docstring. One collection runs at
+  a time; a second trigger while one is running returns `state="busy"` with
+  the running `job_id` to poll.
+- `get_collection_status(job_id)` → `state` (`running`/`done`/`failed`/
+  `busy`), timing, a manifest summary, and — when `done` — the
+  `download_url` (an `https://` `.tar.gz` URL). Fetch it with `curl`, not
+  through MCP: the tarball is binary and can be tens of MB, far above the
+  MCP tool-result cap.
+
+### Server-side deployment (one-time)
+
+The `cdp-mcp` systemd unit and the reverse-proxy nginx both need a small
+addition so the server can write the tarball and nginx can serve it.
+
+**1. Create the collect + exports dirs** (the collector writes to
+`collect/`; nginx reads from `exports/`):
+
+```bash
+sudo mkdir -p /opt/cdp-mcp/collect /opt/cdp-mcp/exports
+sudo chown mcp-user:mcp-user /opt/cdp-mcp/collect /opt/cdp-mcp/exports
+```
+
+**2. Add them to the unit's `ReadWritePaths`** (`ProtectSystem=strict`
+otherwise blocks writes):
+
+```ini
+ReadWritePaths=/tmp /var/log/cdp-mcp /opt/cdp-mcp/collect /opt/cdp-mcp/exports
+```
+
+`daemon-reload` + `restart cdp-mcp.service` after editing.
+
+**3. nginx `location /exports/`** — serve the tarballs, gated by the same
+`X-Gateway-Token` nginx map (`$alias_svc_gateway_ok`, defined in
+`conf.d/alias_svc_gateway_auth.conf`) that protects the `/alias-svc/*`
+endpoints. Add this block **before** the `location /` catch-all so it
+matches first:
+
+```nginx
+location /exports/ {
+    if ($alias_svc_gateway_ok = 0) {
+        return 401;
+    }
+    alias /opt/cdp-mcp/exports/;
+    autoindex off;
+    default_type application/gzip;
+    add_header Content-Disposition "attachment" always;
+}
+```
+
+`nginx -t && systemctl reload nginx`. The downloads bypass LiteLLM and the
+mask proxy entirely — the tarball is binary, and the mask proxy is
+JSON-RPC-aware (it would mangle a non-JSON body). nginx streams and
+range-requests natively; no `proxy_buffering` concerns.
+
+### Config (env vars, read at tool-call time)
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `COLLECTOR_COLLECT_ROOT` | `/opt/cdp-mcp/collect` | Where per-job out dirs are written (one subdir per `job_id`). |
+| `COLLECTOR_EXPORTS_DIR` | `/opt/cdp-mcp/exports` | Where tarballs land; must match the nginx `alias`. |
+| `COLLECTOR_PUBLIC_BASE_URL` | `https://gateway-ai.cloud.expecc.com` | Base URL the `download_url` is built from (the public vhost). |
+
+All are optional — the defaults match the VPS deployment. Unset them
+locally (e.g. point at a tmp dir) when testing without nginx.
+
+### End-to-end flow
+
+```
+MCP client
+  ├─ tools/call trigger_collection  →  job_id (state=running)
+  ├─ tools/call get_collection_status(job_id)  … poll until state=done
+  └─ curl -H "X-Gateway-Token: <token>" <download_url>  →  .tar.gz
+```
+
+The `download_url` in the `done` status is the exact URL to `curl`. The
+tarball contains the full `NN_<name>.json` + `_manifest.json` tree (same
+shape as the standalone bundle's `--out`), extractable directly by
+cdp-report's curate/render phases.
+
+### Behaviour notes
+
+- **In-memory job state.** The job registry is process-wide but not
+  persisted. A `cdp-mcp` daemon restart kills any running job and orphans
+  its entry — `get_collection_status` for a pre-restart `job_id` returns
+  "not found". The out dir + tarball on disk survive; a future enhancement
+  could rehydrate job metadata from `exports/`.
+- **`busy`, not queued.** A second trigger while a collection runs does not
+  queue — it returns `busy` with the running `job_id`. Poll that, then
+  trigger again once it's `done`/`failed`.
+- **`failed` vs rejected.** `collect_cluster` raising `SystemExit` (the
+  period-drift guard, or an unknown cluster) surfaces as `state="failed"`
+  with `error="Rejected: …"` and no tarball — a clean rejection, not a
+  mid-run crash. Other exceptions surface as `state="failed"` with the
+  exception type + message.
+- **The output is not masked.** Same caveat as the standalone bundle: the
+  tarball contains raw hostnames/IPs. The `X-Gateway-Token` gates *who* can
+  download, but the data inside is sensitive — control who has the token.
+
+### Troubleshooting (MCP trigger)
+
+| Symptom | Meaning / fix |
+|---------|---------------|
+| `state="failed"`, `error="Rejected: … already has _manifest.json …"` | A re-trigger into the same `job_id` dir with a different period. Each trigger gets a fresh `job_id`/dir, so this only happens if you manually reuse a dir. |
+| `get_collection_status` → "not found" | The `job_id` is from before a server restart (in-memory state lost), or was never returned by `trigger_collection`. If the tarball exists on disk it's still downloadable by URL. |
+| Download returns 401 | Missing/wrong `X-Gateway-Token` header. The gate is the same nginx map as `/alias-svc/*`. |
+| Download returns 404 | The tarball hasn't been written yet (job not `done`), or was cleaned up. Check `state` first. |
+| `state="busy"` | A collection is already running. Poll the returned `job_id`, then retry the trigger. |
