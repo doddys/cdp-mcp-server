@@ -108,13 +108,20 @@ src/cdp_mcp/
 │   ├── iceberg.py       ← IcebergRegistry (original dvergari code)
 │   ├── file_registry.py ← FileRegistry (YAML with env interpolation)
 │   └── env_registry.py ← EnvRegistry (single CM from CM_HOST/CM_PORT/etc.)
-└── clients/
-    ├── yarn_client.py   ← YARN ResourceManager REST API (:8088)
-    ├── spark_client.py  ← Spark History Server REST API (:18088)
-    ├── hdfs_client.py   ← HDFS NameNode JMX (:9870)
-    ├── oozie_client.py  ← Oozie REST API (:11000)
-    ├── errors.py        ← shared SpnegoRequiredError / SpnegoConfigError
-    └── spnego.py        ← lazy httpx-gssapi SPNEGO auth factory (optional [kerberos] extra)
+├── clients/
+│   ├── yarn_client.py   ← YARN ResourceManager REST API (:8088)
+│   ├── spark_client.py  ← Spark History Server REST API (:18088)
+│   ├── hdfs_client.py   ← HDFS NameNode JMX (:9870)
+│   ├── oozie_client.py  ← Oozie REST API (:11000)
+│   ├── errors.py        ← shared SpnegoRequiredError / SpnegoConfigError
+│   └── spnego.py        ← lazy httpx-gssapi SPNEGO auth factory (optional [kerberos] extra)
+└── collector/            ← standalone offline collector (cdp-collect) — see § below
+    ├── collect.py        ← orchestration + CLI; never imports server.py/mcp
+    ├── manifest.py        ← _manifest.json schema + checksums
+    └── metrics_catalog.py ← curated/discovery metric names per service type
+
+scripts/
+└── build_collector_bundle.sh  ← packages collector/ + deps as an offline-installable tarball
 
 tests/
 ├── unit/                ← Unit tests (httpx mocked with respx, no external dependencies)
@@ -254,6 +261,17 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_clust
 # Lint
 .venv/bin/ruff check src/
 .venv/bin/mypy src/ --ignore-missing-imports
+
+# Offline collector: build the deployable bundle (see § below)
+scripts/build_collector_bundle.sh
+TARGET_PLATFORM=aarch64-manylinux2014 TARGET_PYTHON=3.12 scripts/build_collector_bundle.sh
+WITH_KERBEROS=true scripts/build_collector_bundle.sh   # only on a host matching TARGET_PLATFORM
+
+# Offline collector: run directly from this checkout (no bundle needed for local testing)
+REGISTRY_BACKEND=file REGISTRY_FILE_PATH=cm_instances.yaml .venv/bin/cdp-collect --list-clusters
+REGISTRY_BACKEND=file REGISTRY_FILE_PATH=cm_instances.yaml .venv/bin/cdp-collect \
+  --cluster "my-cluster" --period-start 2026-08-01T00:00:00+07:00 \
+  --period-end 2026-08-31T23:59:59+07:00 --out output/my-cluster_202608/
 ```
 
 ---
@@ -347,6 +365,100 @@ by an external mechanism). The **in-process keytab path** (`kerberos_keytab` +
 from the keytab on each downstream tool call, so no external renewer is required.
 The spike script `scripts/spnego_spike.py` is the starting point for manual
 verification.
+
+## Offline collector (`cdp-collect`, implemented)
+
+For CDP clusters an LLM client cannot reach directly (air-gapped/restricted
+client networks). No LLM, no FastMCP/MCP transport: `src/cdp_mcp/collector/`
+imports only `cm_pool`/`clients`/`cm_client`/`registry`/`config` — **never**
+`server.py` — so the `mcp` package is never loaded at runtime (confirmed:
+`import cdp_mcp.collector.collect` leaves `sys.modules` with no `mcp.*`
+entries). Entry point: `cdp-collect` (`cdp_mcp.collector.collect:main`).
+Runs inside the client's network (or a jump host with a tunnel to CM), and
+its `--out` directory is what physically crosses the air-gap afterwards.
+
+- **Full resolution, not the MCP-capped tools.** Uses
+  `get_service_metrics_raw`/`get_host_metrics_raw` (see `cm_client.py`),
+  which skip `MAX_TIMESERIES_POINTS` — that cap exists only to keep MCP tool
+  results under the transport's ~1MB limit, irrelevant when writing straight
+  to local files.
+- **Output matches cdp-report's raw/ directory exactly** — same
+  `NN_<name>.json` flat file naming, same `_manifest.json` shape (`period`/
+  `cluster`/`files: [{file, tool, item_count, truncated,
+  total_matched_in_range, ...}]`) — confirmed against cdp-report-curate's
+  Prerequisites check, cdp-report-render's validation cross-checks, and
+  `scripts/score_export_run.py`'s actual field reads, not just filenames.
+  cdp-report's Phase 1.5+ tooling can point at a collector `--out` directory
+  directly.
+- **Resumable, and honest about failures.** `_manifest.json` tracks
+  per-file completion; re-running the identical command skips entities
+  already recorded. A failed call (SPNEGO challenge, permission denied,
+  transient error) writes `{"status": "not_available", "reason": ...}`
+  instead of nothing at all — cdp-report-curate needs "attempted and
+  failed" distinguishable from "never collected" and from a genuine empty
+  success (`[]`/`{}`). A `not_available` record is **not** treated as done
+  on resume — it's retried, since the cause (a permission grant, a
+  `kinit`, a network blip) may be fixed by the next run.
+- **Timestamps normalized to UTC once, at the top of `collect_cluster`**
+  (`_to_utc_z()`), before anything else uses `start`/`end` — CM's API and
+  every internal chunk-boundary calculation have only been verified against
+  `Z` timestamps, never trust a non-`Z` offset to be interpreted correctly
+  server-side. The period label (e.g. `"August 2026"`) is computed from the
+  **original**, pre-conversion string — order matters: Jakarta midnight
+  Aug 1 is UTC Jul 31 17:00, so labeling from the converted instant would
+  misname the period "July". Pass `--period-end` as the same day's
+  `23:59:59` (inclusive), not the next day's `00:00:00`, matching
+  cdp-report's own convention.
+- **Resuming into a directory whose period doesn't match refuses**, rather
+  than silently reusing stale bounds under a new label — `collect_cluster`
+  raises `SystemExit` if `--period-start`/`--period-end` disagree with an
+  existing `_manifest.json`'s `period`.
+- **Host metrics are chunked, service metrics are not.** Hosts: `<=14`-day
+  sub-range calls, merged (deduped by exact timestamp at chunk seams — CM's
+  `/timeseries` `from`/`to` are inclusive on both ends, so adjacent chunks
+  share a boundary point) into one file per host. Confirmed live: a single
+  full-month call gets coarsened to CM's `SIX_HOURLY` rollup (124 points/31
+  days); `<=14`-day chunks (each gets its own rollup decision) keep it at
+  `HOURLY`. Services deliberately do **not** get this treatment — a finer
+  range doesn't yield finer service-level rollup once the period has aged,
+  matching cdp-report's own documented finding.
+- **Alerts/audit/impala-queries/YARN-long-apps are chunked weekly** — a
+  single call's `matched[:limit]` (alerts/audit) or hard server cap
+  (impala/YARN) can't cover a full month on a busy cluster: confirmed live,
+  one week of IMPORTANT-severity alerts alone matched ~10,000 events.
+  Impala and YARN-long-apps additionally get one **merged** file (deduped
+  by `queryId`/`app_id`) across all weeks, since cdp-report-curate reads the
+  combined file, not the per-week chunks.
+- **Downstream (YARN/Spark/HDFS/Oozie)** via the same
+  `cm_pool.get_{yarn,spark,hdfs,oozie}_client` factories server.py's tools
+  use — SPNEGO-aware, each independently optional (endpoint not discovered
+  → logged and skipped, not an error).
+- **`metrics_catalog.py`** — curated (data-verified for hdfs/yarn/impala/
+  hive_on_tez/hue/zookeeper/solr; schema-verified only for kafka/hbase/
+  phoenix — confirmed present in a real CM v51/CDH 7.1.9 metric schema and
+  round-tripped through a live `/timeseries` query with zero errors, but
+  not yet confirmed against a live-collecting instance of those three
+  services) vs. discovery-only (nifi — this CM instance has zero metric
+  definitions for it, confirmed empirically). Substring matching
+  (`name_contains=`) misses a service's own core per-role metrics the same
+  way host metrics like `cpu_percent` don't say "host" — finding
+  kafka/hbase's real names required searching by JMX vocabulary and
+  filtering by `sources` containing the actual role type, not by
+  service-name substring.
+
+**Deployment:** `scripts/build_collector_bundle.sh` packages `collector/`
+plus only the dependencies it actually imports (excludes `mcp` and the
+iceberg-only `impyla`/`thrift*`) as an offline-installable tarball.
+`WITH_KERBEROS=true` adds `httpx-gssapi` for the downstream clients' SPNEGO
+— must be built on a host matching `TARGET_PLATFORM`, since `gssapi` has no
+PyPI wheel and a cross-platform build silently compiles it for the *build*
+machine instead (confirmed: building for Linux from macOS produced Mach-O
+binaries vendored into a Linux-labeled bundle with no warning); the script
+refuses a mismatch and prints a Docker recipe instead of doing this.
+
+Validated end-to-end against a real production cluster (Astra DaaS DRC,
+Kerberized, reached via a SOCKS5 tunnel + in-process keytab acquisition) —
+not just mocked.
 
 ## Future language note
 The PoC is Python + FastMCP. If validated, consider rewriting in Go for distribution as a static binary.
