@@ -4,18 +4,41 @@ metrics_catalog.py — per-service-type default metric names for collect.py.
 Two tiers, resolved against a specific cluster's live CM metric schema
 (`ClouderaManagerClient.list_available_metrics`) rather than trusted blindly:
 
-1. CURATED_SERVICE_METRICS — metric names already validated live against a
-   real CDP cluster, carried over from cdp-report's export skill
-   (cdp-report/.claude/skills/cdp-report-export/SKILL.md §3, which fetches
-   these same names via get_service_metrics for hdfs/yarn/impala/
-   hive_on_tez/hue/zookeeper/solr monthly reporting runs).
-2. DISCOVERY_HINTS — service types with no curated entry yet, including
-   kafka/nifi/hbase/phoenix: resolved purely from
-   list_available_metrics(name_contains=HINT) at collection time, since no
-   metric names for these have been confirmed against a live cluster here.
-   Once a client site with one of these services has been run through the
-   collector, promote the confirmed names from a run's manifest into
-   CURATED_SERVICE_METRICS above instead of re-discovering every time.
+1. CURATED_SERVICE_METRICS — metric names confirmed to exist. Two grades:
+   - hdfs/yarn/impala/hive_on_tez/hue/zookeeper/solr: validated live against
+     a real CDP cluster's actual *data*, carried over from cdp-report's
+     export skill (cdp-report/.claude/skills/cdp-report-export/SKILL.md §3,
+     which fetches these same names via get_service_metrics for monthly
+     reporting runs) -- these are known to return real, populated series.
+   - kafka/hbase/phoenix: confirmed only against CM's *metric schema*
+     (list_available_metrics against a CM v51/CDH 7.1.9 instance -- the
+     schema is instance-wide, not deployment-dependent, so these names exist
+     in the schema regardless of whether the service is actually installed
+     on any managed cluster) -- NOT yet confirmed to return populated data
+     on a live-collecting instance of these services, since none was
+     available to test against. Note kafka/hbase's core per-role metrics
+     (e.g. kafka's `kafka_offline_partitions_across_kafka_brokers`, hbase's
+     `compaction_queue_size_across_regionservers`) do NOT contain the
+     service name as a substring, the same way host metrics like
+     `cpu_percent` don't say "host" -- name_contains="kafka"/"hbase" alone
+     misses them; finding these required searching by JMX vocabulary
+     (compaction/memstore/requests_/isr_shrinks/etc.) and filtering by
+     `sources` containing the actual role type (KAFKA/REGIONSERVER/HBASE/
+     MASTER), not by service-name substring. phoenix's CM-native monitoring
+     is limited to generic Query Server process/health metrics (cpu/mem/fd/
+     health/events) -- no query-level or throughput metrics were found in
+     the schema at all, unlike Impala's list_impala_queries which has its
+     own dedicated CM API. Once a real site with one of these services runs
+     through the collector, re-confirm which of these actually return
+     non-empty series and prune/extend accordingly.
+2. DISCOVERY_HINTS — service types with no curated entry, resolved purely
+   from list_available_metrics(name_contains=HINT) at collection time.
+   NIFI genuinely has zero metric definitions in the CM instance checked
+   above (0 matches for name_contains="nifi") -- CFM/NiFi is commonly run
+   outside Cloudera Manager entirely, so this CM instance had no NiFi
+   CSD/parcel registered to contribute metric descriptors. Stays
+   discovery-only rather than curated-empty, since a *different* CM
+   instance that does have NiFi installed may well have real definitions.
 
 This module is pure logic (no I/O, no client) so it stays unit-testable
 without mocking httpx -- collect.py owns fetching the schema and calling
@@ -63,6 +86,58 @@ CURATED_SERVICE_METRICS: dict[str, list[str]] = {
         "total_index_size_across_solr_replicas",
         "index_size_across_solr_replicas",
     ],
+    "KAFKA": [
+        # Health/availability -- exactly one active controller is expected
+        # cluster-wide; 0 or >1 indicates a controller election problem.
+        "kafka_active_controller_across_kafka_brokers",
+        "kafka_offline_partitions_across_kafka_brokers",
+        # Durability risk -- partitions running below their replication
+        # factor / minimum in-sync replica count.
+        "kafka_under_replicated_partitions_across_kafka_brokers",
+        "kafka_under_min_isr_partition_count_across_kafka_brokers",
+        # Stability trend -- frequent ISR churn or unclean leader elections
+        # indicate broker instability or network issues, not just noise.
+        "kafka_isr_shrinks_rate_across_kafka_brokers",
+        "kafka_unclean_leader_elections_rate_across_kafka_brokers",
+        # Throughput.
+        "kafka_produce_requests_rate_across_kafka_brokers",
+        "kafka_fetch_consumer_requests_rate_across_kafka_brokers",
+        # Saturation -- request-handler thread pool idle percentage nearing
+        # zero is the standard Kafka broker capacity-headroom signal.
+        "kafka_request_handler_avg_idle_rate_across_kafka_brokers",
+        # Capacity/inventory context for topic/partition growth trends.
+        "kafka_global_topic_count_across_kafka_brokers",
+        "kafka_global_partition_count_across_kafka_brokers",
+        # Disk headroom -- a full log directory crashes the broker.
+        "kafka_log_directory_disk_free_space_across_kafka_broker_log_directories",
+    ],
+    "HBASE": [
+        # Throughput.
+        "requests_rate_across_regionservers",
+        "read_requests_rate_across_regionservers",
+        "write_requests_rate_across_regionservers",
+        # Saturation/health -- a growing compaction or flush queue is the
+        # standard RegionServer write-pressure early-warning signal.
+        "compaction_queue_size_across_regionservers",
+        "flush_queue_size_across_regionservers",
+        # Memory pressure -- memstore approaching its flush threshold.
+        "memstore_size_across_regionservers",
+        # Read performance -- block cache hit ratio.
+        "total_block_cache_express_hit_ratio_across_regionservers",
+        # Region-level health.
+        "regions_with_errors_across_htables",
+        "regions_healthy_across_htables",
+    ],
+    "PHOENIX": [
+        # Phoenix Query Server exposes only generic process/health metrics
+        # to CM -- no query-level or throughput metrics exist in the schema
+        # (unlike Impala, which has its own dedicated list_impala_queries
+        # API). This set mirrors HUE's generic request/health pattern.
+        "health_bad_rate_across_phoenix_query_servers",
+        "health_disabled_rate_across_phoenix_query_servers",
+        "mem_rss_across_phoenix_query_servers",
+        "events_critical_rate_across_phoenixs",
+    ],
 }
 
 # service.type strings (as returned by ClouderaManagerClient.list_services)
@@ -70,11 +145,8 @@ CURATED_SERVICE_METRICS: dict[str, list[str]] = {
 # case-insensitive substring passed to list_available_metrics(name_contains=),
 # not a metric name itself.
 DISCOVERY_HINTS: dict[str, str] = {
-    "KAFKA": "kafka",
     "NIFI": "nifi",
     "NIFIREGISTRY": "nifi",
-    "HBASE": "hbase",
-    "PHOENIX": "phoenix",
 }
 
 # Validated live (cdp-report SKILL.md §3). NOTE: cpu_user_rate/cpu_system_rate
