@@ -114,6 +114,7 @@ src/cdp_mcp/
 │   ├── hdfs_client.py   ← HDFS NameNode JMX (:9870)
 │   ├── oozie_client.py  ← Oozie REST API (:11000)
 │   ├── errors.py        ← shared SpnegoRequiredError / SpnegoConfigError
+│   ├── http_fallback.py ← shared HTTPS→HTTP port fallback helper for downstream fetches
 │   └── spnego.py        ← lazy httpx-gssapi SPNEGO auth factory (optional [kerberos] extra)
 └── collector/            ← standalone offline collector (cdp-collect) — see § below
     ├── collect.py        ← orchestration + CLI; never imports server.py/mcp
@@ -368,6 +369,58 @@ by an external mechanism). The **in-process keytab path** (`kerberos_keytab` +
 from the keytab on each downstream tool call, so no external renewer is required.
 The spike script `scripts/spnego_spike.py` is the starting point for manual
 verification.
+
+## HTTPS→HTTP port fallback (implemented)
+
+Some clusters (OCBC AA/OS/Ultron — CDH 7.1.9) have **HTTPS disabled on the
+downstream service web UIs**; only the HTTP port is open. Discovery reads
+*config* (the HTTPS port from `dfs_https_port` etc.), not a live probe, so
+it can't tell the HTTPS listener is dead — it hands the client an HTTPS URL
+whose port has no listener, and every downstream tool call
+(`get_namenode_status`, `get_yarn_queue`, `list_yarn_apps`, weekly YARN
+chunks, Spark HS, Oozie) returns `not_available` ("All connection attempts
+failed"). The DRC path is unaffected — its downstream UIs listen on HTTPS.
+
+**Request-time fallback, not discovery-time.** Because discovery can't
+detect a dead listener (it reads config, not a socket), the fallback fires
+at request time inside the client. A shared helper,
+`clients/http_fallback.py → fetch_with_http_fallback()`, wraps the single
+`httpx.AsyncClient` call site each downstream client already had:
+- Try the HTTPS endpoint (primary) first.
+- On `ConnectError`/`ConnectTimeout`/`ReadTimeout` — the
+  connection/handshake-never-completed family — fall back to the HTTP port
+  on the same host (the fallback URL).
+- **Do NOT fall back on `HTTPError`** (401/403/404): a status response means
+  the port *answered*, and the issue is Kerberos/SPNEGO auth or a missing
+  path — not SSL. Falling back there would silently retry a working port
+  and mask the real auth error.
+- When both ports fail, raise `ServiceUnavailable` with an enriched reason
+  naming both URLs tried (e.g. `"NameNode JMX unreachable: tried
+  https://nn:9871 (ConnectError: ...) and http://nn:9870 (ConnectError:
+  ...)"`). This flows through to the collector's `not_available` stub
+  unchanged via `str(exc)` — no collector edit needed.
+- `verify=False` on the HTTPS attempt is acceptable (self-signed certs are
+  common on internal UIs).
+- No fallback when `fallback_url is None` (single-scheme client) or when
+  `fallback_url == primary_url` (primary is already HTTP, HTTPS not
+  configured) — the original error is re-raised rather than producing a
+  "tried X twice" message. This preserves the prior behaviour for
+  clusters where discovery found only an HTTP URL.
+
+**Discovery always computes the HTTP URL.** `cm_pool.py`'s four
+`_discover_*` methods now always read the HTTP config port
+(`dfs.namenode.http-address` / `yarn.resourcemanager.webapp.address` /
+`history.port` / `oozie_http_port`, defaulting to 9870/8088/18080/11000)
+*and* the HTTPS config port, storing both on `ServiceEndpoints`
+(`*_url` = primary, `*_http_url` = fallback; HDFS gets
+`hdfs_nn_http_candidates` paired 1:1 by index with `hdfs_nn_candidates`
+for HA). The `get_{hdfs,yarn,spark,oozie}_client` factories thread these
+into the clients' new `http_url`/`http_candidates` params. Each client
+extracted a `_map_response` method (the error-mapping logic that lived
+inline in its `_get`/`_get_json`) so the helper can apply it uniformly.
+
+Port pairs: NameNode 9871→9870, YARN RM 8090→8088, Spark HS 18481→18080,
+Oozie (configured)→11000.
 
 ## Offline collector (`cdp-collect`, implemented)
 
