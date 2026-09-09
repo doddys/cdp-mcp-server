@@ -431,6 +431,24 @@ inline in its `_get`/`_get_json`) so the helper can apply it uniformly.
 Port pairs: NameNode 9871→9870, YARN RM 8090→8088, Spark HS 18481→18080,
 Oozie (configured)→11000.
 
+### Request-time diagnostics (implemented)
+The helper emits per-fetch logs so a downstream `ConnectError: All connection
+attempts failed` is diagnosable on the next run:
+- DEBUG `downstream.fetch_attempt` — every attempt: `service`, `url`, `path`,
+  `fallback_available`. DEBUG `fetch_ok`/`fetch_ok_after_fallback` — which URL
+  answered.
+- WARNING `downstream.fetch_failed_no_fallback` — primary failed, no fallback
+  (`no_fallback_configured` = override/single-scheme, or `primary_is_http`).
+  Visible at the default INFO level, so the cause surfaces without DEBUG.
+- WARNING `downstream.fetch_failed_both_urls` — both HTTPS and HTTP failed.
+- INFO `collect.downstream_connecting` (collector only) — which endpoint each
+  downstream client connects to, `http_fallback_url`, and `overridden` flag.
+
+The collector CLI gained a `--log-level` flag (default `$LOG_LEVEL` or `INFO`)
++ a `structlog.configure` call — the CLI path previously never configured
+structlog, so DEBUG never surfaced. The MCP-triggered path inherits the
+server's `LOG_LEVEL` (set `Environment=LOG_LEVEL=DEBUG` in the systemd unit).
+
 ## Offline collector (`cdp-collect`, implemented)
 
 For CDP clusters an LLM client cannot reach directly (air-gapped/restricted

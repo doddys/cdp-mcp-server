@@ -110,7 +110,7 @@ class ServerSettings(BaseSettings):
     }
 
     server_name: str = "cdp-mcp"
-    server_version: str = "0.1.0"
+    server_version: str = "0.1.2"
     log_level: str = "INFO"
     max_concurrent_requests: int = 10
     log_lines_per_role: int = 500

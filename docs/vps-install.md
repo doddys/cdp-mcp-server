@@ -386,6 +386,10 @@ Environment=ALL_PROXY=socks5h://127.0.0.1:1080
 Environment=REGISTRY_BACKEND=file
 Environment=REGISTRY_FILE_PATH=/opt/cdp-mcp-server/cm_instances.yaml
 
+# Logging (optional — default INFO; set DEBUG to diagnose downstream
+# ConnectError / not_available on the next run)
+#Environment=LOG_LEVEL=DEBUG
+
 # Pull CM_PASSWORD etc. from the secret file
 EnvironmentFile=/etc/cdp-mcp/cdp-mcp.env
 
@@ -421,8 +425,13 @@ Notes:
 - `ALL_PROXY=socks5h://` — the `h` is mandatory for remote DNS. This covers both
   the CM client and the four downstream clients (httpx `trust_env` is on by
   default; no code/config field needed).
-- If you'd rather log to a file, set `MCP_LOG_LEVEL`/add a logging config; by
-  default cdp-mcp logs to stdout, which systemd captures in the journal.
+- cdp-mcp logs to **stderr** (so it doesn't corrupt the stdio JSON-RPC
+  protocol), which systemd captures in the journal. The level defaults to
+  `INFO`; set `Environment=LOG_LEVEL=DEBUG` in the unit to surface per-fetch
+  downstream connection diagnostics (which URL was tried, why it failed) —
+  useful when a downstream tool returns `ConnectError: All connection attempts
+  failed`. See `docs/collector-deploy.md` § Troubleshooting for the log-event
+  reference.
 
 Start it:
 

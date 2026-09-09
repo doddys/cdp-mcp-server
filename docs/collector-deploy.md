@@ -192,6 +192,7 @@ Useful flags:
 | `--concurrency N` | Max parallel host-metrics calls (default 4; raise for a beefier CM, lower if CM times out under load). |
 | `--skip-downstream` | CM data only — skip YARN/Spark/HDFS/Oozie (not installed, or Kerberos not set up yet). |
 | `--list-clusters` | Discover cluster names and exit. |
+| `--log-level LEVEL` | structlog level: `DEBUG`/`INFO`/`WARNING` (default: `$LOG_LEVEL` or `INFO`). Use `DEBUG` to see which downstream URL each fetch attempts and why it failed. |
 
 ### Period conventions
 
@@ -268,6 +269,56 @@ follow the client's data-handling policy for what may leave.
 | Import error on `gssapi` at client site | Kerberos bundle was built on a mismatched platform — rebuild via the Docker recipe in § 1. |
 | `truncated: true` in an alerts/audit file | That chunk matched more events than the collector's per-file cap; the manifest's `total_matched_in_range` records how many. |
 | Metrics coarse (6h spacing) | Expected if host metrics were fetched as one full-period call — the collector avoids this via ≤14-day chunks; check you're on a current bundle. |
+| Downstream file is `not_available` with `reason: ... unreachable: tried https://... and http://...` | Both the HTTPS and HTTP ports of that service are unreachable. See **Diagnosing downstream connection failures** below — re-run with `--log-level DEBUG`. |
+| Downstream file is `not_available` with a bare `ConnectError: All connection attempts failed` (only one URL named) | The endpoint came from `endpoints_override` or HTTPS wasn't configured, so there was no HTTP fallback to try. The override URL is used as-is. See **Diagnosing downstream connection failures** below. |
+
+### Diagnosing downstream connection failures
+
+When a downstream tool (`get_namenode_status`, `get_yarn_queue`, `list_yarn_apps`,
+Spark HS, Oozie) returns `not_available` / `ConnectError: All connection
+attempts failed`, the cause is in the request-time logs. Re-run with
+`--log-level DEBUG`:
+
+```bash
+./run_collect.sh --log-level DEBUG --cluster <name> \
+    --period-start 2026-08-01T00:00:00+07:00 \
+    --period-end   2026-08-31T23:59:59+07:00 --out output/<name>_202608/
+```
+
+The shared fetch helper (`clients/http_fallback.py`) emits, per downstream
+call:
+
+| Log event | Level | Meaning |
+|-----------|-------|---------|
+| `downstream.fetch_attempt` | DEBUG | Every attempt: `service`, `url`, `path`, `fallback_available` (True/False). |
+| `downstream.fetch_ok` | DEBUG | The primary URL answered successfully. |
+| `downstream.fetch_ok_after_fallback` | DEBUG | The primary failed and the HTTP fallback answered. |
+| `downstream.https_failed_falling_back` | INFO | HTTPS failed with a connection error; trying the HTTP port. |
+| `downstream.fetch_failed_no_fallback` | WARNING | Primary failed and there is **no** fallback (`no_fallback_configured` = override/single-scheme, or `primary_is_http`). Names the URL + error. Visible at the default INFO level. |
+| `downstream.fetch_failed_both_urls` | WARNING | Both HTTPS and HTTP failed. Names both URLs + their errors. Visible at the default INFO level. |
+| `collect.downstream_connecting` | INFO | Which endpoint each downstream client connects to, its `http_fallback_url`, and whether it was `overridden`. |
+
+The `ConnectError: All connection attempts failed` symptom (a *bare* error with
+only one URL) means `fallback_available` was False — either the endpoint was an
+explicit `endpoints_override` (used as-is, no fallback by design) or HTTPS
+wasn't configured so the primary is already the HTTP URL. The
+`downstream.fetch_failed_no_fallback` WARNING line names the exact URL and
+reason.
+
+**HTTPS→HTTP port fallback.** Some clusters (CDH 7.1.9 with HTTPS disabled on
+the web UIs) have only the HTTP port open, but CM *config* reports the HTTPS
+port — discovery hands the client an HTTPS URL whose port has no listener. The
+helper tries HTTPS first and, on a connection error (`ConnectError`/
+`ConnectTimeout`/`ReadTimeout`), falls back to the HTTP port on the same host.
+A status response (401/403/404) does **not** trigger fallback — that means the
+port answered and the issue is Kerberos/SPNEGO auth, not SSL. Port pairs:
+NameNode 9871→9870, YARN RM 8090→8088, Spark HS 18481→18080, Oozie→11000.
+
+**Overrides disable fallback.** An `endpoints_override` entry in
+`cm_instances.yaml` is an explicit instruction to use exactly that URL. The
+override sets the URL but not an HTTP fallback, so the URL is used as-is even if
+its port is dead — the helper re-raises the original connection error rather
+than retrying on an HTTP port. Fallback only fires for *discovered* endpoints.
 
 ---
 
