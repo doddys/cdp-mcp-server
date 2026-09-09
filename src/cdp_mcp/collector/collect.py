@@ -779,6 +779,18 @@ def _merge_yarn_long_apps(weekly: list[dict], start: str, end: str) -> dict:
     }
 
 
+def _override_url(pool: CMPool, cluster: str, key: str) -> str | None:
+    """Return the endpoints_override value for ``key`` if the CM instance
+    managing ``cluster`` set one, else None. Used only to flag whether the
+    endpoint a downstream client connects to was explicitly overridden (in
+    which case the HTTPS→HTTP fallback is intentionally suppressed -- an
+    override is an explicit instruction to use exactly that URL)."""
+    client = pool.get_client_for_cluster(cluster)
+    if client is None or not client.cfg.endpoints_override:
+        return None
+    return client.cfg.endpoints_override.get(key)
+
+
 async def collect_yarn_long_apps(
     pool: CMPool, cluster: str, start: str, end: str, out_dir: Path, manifest: Manifest
 ) -> None:
@@ -790,6 +802,13 @@ async def collect_yarn_long_apps(
         log.info("collect.endpoint_not_discovered", service="yarn_long_apps")
         return
     yarn = pool.get_yarn_client(cluster)
+    log.info(
+        "collect.downstream_connecting",
+        service="yarn_long_apps",
+        url=endpoints.yarn_rm_url,
+        http_fallback_url=endpoints.yarn_rm_http_url,
+        overridden=endpoints.yarn_rm_url == _override_url(pool, cluster, "yarn_rm"),
+    )
     weekly_results = []
     for i, (wstart, wend) in enumerate(_weekly_ranges(start, end), 1):
         data = await _write_entity(
@@ -836,6 +855,13 @@ async def collect_downstream(
 
     if endpoints.yarn_rm_url:
         yarn = pool.get_yarn_client(cluster)
+        log.info(
+            "collect.downstream_connecting",
+            service="yarn",
+            url=endpoints.yarn_rm_url,
+            http_fallback_url=endpoints.yarn_rm_http_url,
+            overridden=endpoints.yarn_rm_url == _override_url(pool, cluster, "yarn_rm"),
+        )
         await _write_entity(
             "07_list_yarn_apps.json", "list_yarn_apps", out_dir, manifest,
             lambda: _yarn_apps_snapshot_wrapped(yarn, start, end),
@@ -853,6 +879,13 @@ async def collect_downstream(
 
     if endpoints.spark_hs_url:
         spark = pool.get_spark_client(cluster)
+        log.info(
+            "collect.downstream_connecting",
+            service="spark",
+            url=endpoints.spark_hs_url,
+            http_fallback_url=endpoints.spark_hs_http_url,
+            overridden=endpoints.spark_hs_url == _override_url(pool, cluster, "spark_hs"),
+        )
         # No time filter on Spark HS's /applications -- "most recent N as of
         # collection time" snapshot, not period-bounded.
         await _write_entity(
@@ -866,6 +899,14 @@ async def collect_downstream(
 
     if endpoints.hdfs_nn_url:
         hdfs = pool.get_hdfs_client(cluster)
+        log.info(
+            "collect.downstream_connecting",
+            service="hdfs",
+            url=endpoints.hdfs_nn_url,
+            http_fallback_url=endpoints.hdfs_nn_http_url,
+            candidates=endpoints.hdfs_nn_candidates or [endpoints.hdfs_nn_url],
+            overridden=endpoints.hdfs_nn_url == _override_url(pool, cluster, "hdfs_nn"),
+        )
         await _write_entity(
             "07_get_namenode_status.json", "get_namenode_status", out_dir, manifest,
             lambda: hdfs.get_namenode_status(), count_fn=lambda _d: 1,
@@ -876,6 +917,13 @@ async def collect_downstream(
 
     if endpoints.oozie_url:
         oozie = pool.get_oozie_client(cluster)
+        log.info(
+            "collect.downstream_connecting",
+            service="oozie",
+            url=endpoints.oozie_url,
+            http_fallback_url=endpoints.oozie_http_url,
+            overridden=endpoints.oozie_url == _override_url(pool, cluster, "oozie"),
+        )
         # No time filter on Oozie's /jobs either -- same snapshot caveat.
         # "wf" matches cdp-report's 07_list_oozie_jobs.json convention;
         # coordinator jobs are an addition (separate file, non-breaking).

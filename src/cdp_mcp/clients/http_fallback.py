@@ -104,10 +104,18 @@ async def fetch_with_http_fallback(
     try:
         return await _attempt(primary_url)
     except _CONNECTION_ERRORS as primary_exc:
-        # No fallback if there's no distinct HTTP URL: either the caller
-        # passed none (single-scheme client) or HTTPS wasn't configured and
-        # the primary is already the HTTP URL (retrying it would just produce
-        # a confusing "tried X twice" message).
+        # No fallback if there's no distinct HTTP URL. Two cases land here,
+        # both intentional:
+        #   1. The caller passed no fallback (single-scheme client, or HTTPS
+        #      wasn't configured so primary is already the HTTP URL).
+        #   2. The endpoint came from cm_instances.yaml `endpoints_override`
+        #      — an explicit instruction to use exactly that URL. The
+        #      override path in cm_pool.py sets *_url but not *_http_url, so
+        #      fallback_url is None here and the override is used as-is,
+        #      even if its port is dead. Fallback only happens for
+        #      *discovered* endpoints (where discovery also computed the
+        #      HTTP URL). Retrying the same URL would just produce a
+        #      confusing "tried X twice" message, so re-raise the original.
         if fallback_url is None or fallback_url == primary_url:
             raise
         log.info(

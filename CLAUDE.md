@@ -151,6 +151,15 @@ Every client in `clients/` must:
 ### 3. Auto-discovery, not manual configuration
 YARN/Spark/Oozie/HDFS endpoints are discovered from CM at startup in `cm_pool.py → _discover_service_endpoints()`. Do not add env vars for these URLs. Acceptable override: `endpoints_override` in `cm_instances.yaml`.
 
+**Override = no HTTPS→HTTP fallback.** `endpoints_override` is an explicit
+instruction to use exactly that URL. The override path in
+`_discover_service_endpoints` sets `*_url` but leaves `*_http_url` `None`, so
+when the fetch helper sees `fallback_url is None` it re-raises the original
+connection error rather than trying an HTTP port — even if the overridden
+HTTPS port is dead. The HTTPS→HTTP fallback fires only for *discovered*
+endpoints (where discovery also computed the HTTP URL). Override keys:
+`yarn_rm`, `spark_hs`, `hdfs_nn`, `oozie`.
+
 ### 4. Tools in server.py are read-mostly
 New troubleshooting tools (YARN, Spark, HDFS, Oozie) are all **read-only**. Mutating tools require explicit discussion.
 

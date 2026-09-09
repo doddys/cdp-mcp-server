@@ -273,3 +273,100 @@ def test_factory_passes_none_when_no_http_url():
     client = pool.get_yarn_client("C")
     assert client is not None
     assert client._http_url is None
+
+
+# ── endpoints_override: URL used as-is, NO HTTP fallback ─────────────────────
+
+
+class _OverrideCfg:
+    """Minimal cfg stub exposing endpoints_override + downstream settings."""
+
+    def __init__(self, override: dict | None):
+        self.endpoints_override = override
+        self.downstream_timeout_seconds = 30
+        self.disable_on_spnego = True
+        self.kerberos = False
+        self.kerberos_keytab = None
+        self.kerberos_principal = None
+
+
+class _OverrideCMClient:
+    """CM client stub for the override path: list_services returns [] so
+    discovery finds nothing to discover (override should short-circuit it)."""
+
+    def __init__(self, cfg: _OverrideCfg):
+        self.cfg = cfg
+
+    async def list_services(self, cluster_name: str) -> list[dict]:
+        return []  # no services → discovery skips; override already set the URL
+
+
+@pytest.mark.asyncio
+async def test_override_sets_url_but_not_http_url():
+    """An endpoints_override entry sets *_url and leaves *_http_url None —
+    the HTTPS→HTTP fallback is intentionally suppressed for overrides (an
+    explicit instruction to use exactly that URL, even if its port is dead)."""
+    pool = _make_pool()
+    cfg = _OverrideCfg({"yarn_rm": "https://custom-rm:8090"})
+    client = _OverrideCMClient(cfg)
+    pool._clients["env1"] = client  # type: ignore[assignment]
+    await pool._discover_service_endpoints("cluster1", client)
+    eps = pool.get_endpoints("cluster1")
+    assert eps.yarn_rm_url == "https://custom-rm:8090"
+    assert eps.yarn_rm_http_url is None  # ← no fallback URL
+
+
+@pytest.mark.asyncio
+async def test_override_skips_discovery():
+    """When an override is present, discovery for that service is skipped
+    (the `if not eps.yarn_rm_url` guard short-circuits _discover_yarn)."""
+    pool = _make_pool()
+    cfg = _OverrideCfg({"hdfs_nn": "http://custom-nn:9870"})
+    client = _OverrideCMClient(cfg)
+    pool._clients["env1"] = client  # type: ignore[assignment]
+    # list_services returns [] so even if discovery ran it would find nothing —
+    # but the override should set the URL before discovery is even considered.
+    await pool._discover_service_endpoints("cluster1", client)
+    eps = pool.get_endpoints("cluster1")
+    assert eps.hdfs_nn_url == "http://custom-nn:9870"
+    assert eps.hdfs_nn_candidates == ["http://custom-nn:9870"]
+    assert eps.hdfs_nn_http_url is None
+    assert eps.hdfs_nn_http_candidates == []
+
+
+@pytest.mark.asyncio
+async def test_override_factory_client_has_no_http_fallback():
+    """The client built from an overridden endpoint has _http_url=None, so the
+    fetch helper re-raises on a connection error instead of falling back."""
+    pool = _make_pool()
+    pool._endpoints["c"] = ServiceEndpoints(
+        yarn_rm_url="https://custom-rm:8090",  # overridden, no http_url
+    )
+    client = pool.get_yarn_client("C")
+    assert client is not None
+    assert client._http_url is None  # → helper re-raises, no fallback
+
+
+@pytest.mark.asyncio
+async def test_override_https_dead_port_used_as_is():
+    """End-to-end: an override HTTPS URL whose port is dead raises the
+    connection error directly (after retries), NOT a fallback to an HTTP port.
+    The override is used exactly as given — no fallback is attempted."""
+    import httpx
+    import respx
+
+    pool = _make_pool()
+    pool._endpoints["c"] = ServiceEndpoints(
+        yarn_rm_url="https://custom-rm:8090",  # overridden
+    )
+    yarn = pool.get_yarn_client("C")
+    assert yarn is not None
+    assert yarn._http_url is None  # no fallback URL
+    with respx.mock:
+        # HTTPS port dead; no HTTP route registered (there is no fallback URL).
+        respx.get("https://custom-rm:8090/ws/v1/cluster/scheduler").mock(
+            side_effect=httpx.ConnectError("connection refused")
+        )
+        # No fallback → original ConnectError re-raised (after retries).
+        with pytest.raises(httpx.ConnectError):
+            await yarn.get_queue()
