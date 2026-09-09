@@ -15,6 +15,7 @@ from tenacity import (
 )
 
 from cdp_mcp.clients.errors import SpnegoRequiredError
+from cdp_mcp.clients.http_fallback import fetch_with_http_fallback
 
 log = structlog.get_logger(__name__)
 
@@ -36,8 +37,10 @@ class SparkServiceUnavailable(SparkClientError):
 # ── Client ────────────────────────────────────────────────────────────────────
 
 class SparkClient:
-    def __init__(self, base_url: str, timeout: int = 30, auth: Any = None) -> None:
+    def __init__(self, base_url: str, timeout: int = 30, auth: Any = None,
+                 http_url: str | None = None) -> None:
         self._base_url = base_url.rstrip("/")
+        self._http_url = http_url.rstrip("/") if http_url else None
         self._timeout = timeout
         self._auth = auth
 
@@ -51,47 +54,44 @@ class SparkClient:
             reraise=True,
         )
 
-    async def _get(self, path: str, params: dict | None = None) -> dict:
-        @self._retry_dec()
-        async def _execute() -> dict:
-            async with httpx.AsyncClient(
-                base_url=self._base_url,
-                auth=self._auth,
-                timeout=self._timeout,
-                verify=False,
-                follow_redirects=True,
-            ) as client:
-                try:
-                    resp = await client.get(path, params=params)
-                except httpx.TransportError:
-                    raise
-                if resp.status_code == 401:
-                    if "negotiate" in resp.headers.get("www-authenticate", "").lower():
-                        raise SpnegoRequiredError(f"SPNEGO required for {self._base_url}")
-                if resp.status_code == 404:
-                    raise SparkNotFoundError(f"Not found: {path}")
-                if resp.status_code in (503, 504):
-                    raise SparkServiceUnavailable(
-                        f"Spark HS unavailable: {resp.status_code}"
-                    )
-                if resp.status_code >= 400:
-                    raise SparkClientError(f"Spark HS HTTP {resp.status_code}")
-                try:
-                    return resp.json()
-                except ValueError as exc:
-                    log.warning(
-                        "spark_client.non_json_response",
-                        status=resp.status_code,
-                        content_type=resp.headers.get("content-type"),
-                        body=resp.text[:300],
-                    )
-                    raise SparkClientError(
-                        f"Spark HS returned non-JSON response (HTTP {resp.status_code}, "
-                        f"content-type={resp.headers.get('content-type')!r}): "
-                        f"{resp.text[:300]!r}"
-                    ) from exc
+    def _map_response(self, resp: httpx.Response, path: str, base_url: str) -> dict:
+        if resp.status_code == 401:
+            if "negotiate" in resp.headers.get("www-authenticate", "").lower():
+                raise SpnegoRequiredError(f"SPNEGO required for {base_url}")
+        if resp.status_code == 404:
+            raise SparkNotFoundError(f"Not found: {path}")
+        if resp.status_code in (503, 504):
+            raise SparkServiceUnavailable(f"Spark HS unavailable: {resp.status_code}")
+        if resp.status_code >= 400:
+            raise SparkClientError(f"Spark HS HTTP {resp.status_code}")
+        try:
+            return resp.json()
+        except ValueError as exc:
+            log.warning(
+                "spark_client.non_json_response",
+                status=resp.status_code,
+                content_type=resp.headers.get("content-type"),
+                body=resp.text[:300],
+            )
+            raise SparkClientError(
+                f"Spark HS returned non-JSON response (HTTP {resp.status_code}, "
+                f"content-type={resp.headers.get('content-type')!r}): "
+                f"{resp.text[:300]!r}"
+            ) from exc
 
-        return await _execute()
+    async def _get(self, path: str, params: dict | None = None) -> dict:
+        return await fetch_with_http_fallback(
+            primary_url=self._base_url,
+            fallback_url=self._http_url,
+            path=path,
+            params=params,
+            auth=self._auth,
+            timeout=self._timeout,
+            retry_dec=self._retry_dec,
+            map_response=self._map_response,
+            service_unavailable=SparkServiceUnavailable,
+            service_label="Spark HS",
+        )
 
     async def get_app(self, app_id: str) -> dict:
         """

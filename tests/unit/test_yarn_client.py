@@ -1,13 +1,12 @@
 """Unit tests for YarnClient using respx to mock httpx."""
 from __future__ import annotations
 
+import httpx
 import pytest
 import respx
-import httpx
 
 from cdp_mcp.clients.errors import SpnegoRequiredError
 from cdp_mcp.clients.yarn_client import YarnClient, YarnNotFoundError
-
 
 BASE = "http://rm.example.com:8088"
 
@@ -427,3 +426,86 @@ async def test_get_app_spnego_challenge_raises(client):
     )
     with pytest.raises(SpnegoRequiredError):
         await client.get_app("application_001")
+
+
+# ── HTTPS→HTTP port fallback ──────────────────────────────────────────────────
+
+HTTPS_BASE = "https://rm.example.com:8090"
+HTTP_FALLBACK = "http://rm.example.com:8088"
+
+
+@pytest.fixture
+def fallback_client():
+    """Client whose discovered primary URL is HTTPS but the HTTPS port has no
+    listener — must fall back to the HTTP port (OCBC AA/OS/Ultron case)."""
+    return YarnClient(HTTPS_BASE, timeout=5, http_url=HTTP_FALLBACK)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_app_https_connect_error_falls_back_to_http(fallback_client):
+    """HTTPS RM port refused → fall back to HTTP port, return real app data."""
+    respx.get(f"{HTTPS_BASE}/ws/v1/cluster/apps/application_001").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+    respx.get(f"{HTTP_FALLBACK}/ws/v1/cluster/apps/application_001").mock(
+        return_value=httpx.Response(
+            200,
+            json={"app": {"id": "application_001", "name": "MySparkJob", "user": "alice",
+                          "queue": "default", "state": "RUNNING", "finalStatus": "UNDEFINED",
+                          "progress": 42.5, "trackingUrl": "", "diagnostics": "",
+                          "elapsedTime": 12000, "memorySeconds": 90000, "vcoreSeconds": 10,
+                          "startedTime": 1700000000000, "finishedTime": 0, "clusterId": 12345}},
+        )
+    )
+    result = await fallback_client.get_app("application_001")
+    assert result["app_id"] == "application_001"
+    assert result["state"] == "RUNNING"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_queue_https_connect_error_falls_back_to_http(fallback_client):
+    """get_queue (a different _get path) also falls back to HTTP."""
+    respx.get(f"{HTTPS_BASE}/ws/v1/cluster/scheduler").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+    respx.get(f"{HTTP_FALLBACK}/ws/v1/cluster/scheduler").mock(
+        return_value=httpx.Response(200, json=SCHEDULER_RESPONSE)
+    )
+    result = await fallback_client.get_queue()
+    assert result["name"] == "root"
+    assert result["num_active_applications"] == 5
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_app_both_ports_unavailable_names_both(fallback_client):
+    """HTTPS and HTTP both unreachable → YarnServiceUnavailable naming both."""
+    from cdp_mcp.clients.yarn_client import YarnServiceUnavailable
+    respx.get(f"{HTTPS_BASE}/ws/v1/cluster/apps/application_001").mock(
+        side_effect=httpx.ConnectError("no route")
+    )
+    respx.get(f"{HTTP_FALLBACK}/ws/v1/cluster/apps/application_001").mock(
+        side_effect=httpx.ConnectError("no route")
+    )
+    with pytest.raises(YarnServiceUnavailable) as exc_info:
+        await fallback_client.get_app("application_001")
+    msg = str(exc_info.value)
+    assert HTTPS_BASE in msg and HTTP_FALLBACK in msg
+    assert "YARN RM unreachable" in msg
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_app_spnego_on_https_no_http_fallback(fallback_client):
+    """401 on HTTPS means the port answered — do NOT fall back to HTTP."""
+    http_route = respx.get(f"{HTTP_FALLBACK}/ws/v1/cluster/apps/application_001").mock(
+        return_value=httpx.Response(200, json={"app": {"id": "application_001"}})
+    )
+    respx.get(f"{HTTPS_BASE}/ws/v1/cluster/apps/application_001").mock(
+        return_value=httpx.Response(401, headers={"WWW-Authenticate": "Negotiate"})
+    )
+    with pytest.raises(SpnegoRequiredError):
+        await fallback_client.get_app("application_001")
+    assert http_route.calls.call_count == 0

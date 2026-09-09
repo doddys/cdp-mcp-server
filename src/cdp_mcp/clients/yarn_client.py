@@ -16,6 +16,7 @@ from tenacity import (
 )
 
 from cdp_mcp.clients.errors import SpnegoRequiredError
+from cdp_mcp.clients.http_fallback import fetch_with_http_fallback
 
 log = structlog.get_logger(__name__)
 
@@ -48,8 +49,10 @@ class YarnClient:
         username: str | None = None,
         password: str | None = None,
         auth: Any = None,
+        http_url: str | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
+        self._http_url = http_url.rstrip("/") if http_url else None
         self._timeout = timeout
         # `auth` (an httpx Auth, e.g. SPNEGO) takes precedence over basic
         # username/password when both are supplied.
@@ -70,50 +73,45 @@ class YarnClient:
             reraise=True,
         )
 
-    async def _get(self, path: str, params: dict | None = None) -> dict:
-        @self._retry_dec()
-        async def _execute() -> dict:
-            async with httpx.AsyncClient(
-                base_url=self._base_url,
-                auth=self._auth,
-                timeout=self._timeout,
-                verify=False,  # internal services often self-signed
-                follow_redirects=True,
-            ) as client:
-                try:
-                    resp = await client.get(path, params=params)
-                except httpx.TransportError:
-                    raise
-                if resp.status_code == 401:
-                    if "negotiate" in resp.headers.get("www-authenticate", "").lower():
-                        raise SpnegoRequiredError(f"SPNEGO required for {self._base_url}")
-                    raise YarnAuthError(f"YARN auth failed: {self._base_url}")
-                if resp.status_code == 404:
-                    raise YarnNotFoundError(f"YARN resource not found: {path}")
-                if resp.status_code in (503, 504):
-                    raise YarnServiceUnavailable(
-                        f"YARN unavailable: {resp.status_code}"
-                    )
-                if resp.status_code >= 400:
-                    raise YarnClientError(
-                        f"YARN HTTP {resp.status_code}: {resp.text[:200]}"
-                    )
-                try:
-                    return resp.json()
-                except ValueError as exc:
-                    log.warning(
-                        "yarn_client.non_json_response",
-                        status=resp.status_code,
-                        content_type=resp.headers.get("content-type"),
-                        body=resp.text[:300],
-                    )
-                    raise YarnClientError(
-                        f"YARN returned non-JSON response (HTTP {resp.status_code}, "
-                        f"content-type={resp.headers.get('content-type')!r}): "
-                        f"{resp.text[:300]!r}"
-                    ) from exc
+    def _map_response(self, resp: httpx.Response, path: str, base_url: str) -> dict:
+        if resp.status_code == 401:
+            if "negotiate" in resp.headers.get("www-authenticate", "").lower():
+                raise SpnegoRequiredError(f"SPNEGO required for {base_url}")
+            raise YarnAuthError(f"YARN auth failed: {base_url}")
+        if resp.status_code == 404:
+            raise YarnNotFoundError(f"YARN resource not found: {path}")
+        if resp.status_code in (503, 504):
+            raise YarnServiceUnavailable(f"YARN unavailable: {resp.status_code}")
+        if resp.status_code >= 400:
+            raise YarnClientError(f"YARN HTTP {resp.status_code}: {resp.text[:200]}")
+        try:
+            return resp.json()
+        except ValueError as exc:
+            log.warning(
+                "yarn_client.non_json_response",
+                status=resp.status_code,
+                content_type=resp.headers.get("content-type"),
+                body=resp.text[:300],
+            )
+            raise YarnClientError(
+                f"YARN returned non-JSON response (HTTP {resp.status_code}, "
+                f"content-type={resp.headers.get('content-type')!r}): "
+                f"{resp.text[:300]!r}"
+            ) from exc
 
-        return await _execute()
+    async def _get(self, path: str, params: dict | None = None) -> dict:
+        return await fetch_with_http_fallback(
+            primary_url=self._base_url,
+            fallback_url=self._http_url,
+            path=path,
+            params=params,
+            auth=self._auth,
+            timeout=self._timeout,
+            retry_dec=self._retry_dec,
+            map_response=self._map_response,
+            service_unavailable=YarnServiceUnavailable,
+            service_label="YARN RM",
+        )
 
     async def get_app(self, app_id: str) -> dict:
         """

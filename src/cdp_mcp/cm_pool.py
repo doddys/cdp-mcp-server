@@ -20,14 +20,23 @@ log = structlog.get_logger(__name__)
 class ServiceEndpoints:
     """Discovered application service endpoints for a single CDP cluster."""
     yarn_rm_url: str | None = None
+    yarn_rm_http_url: str | None = None
     spark_hs_url: str | None = None
+    spark_hs_http_url: str | None = None
     hdfs_nn_url: str | None = None
+    hdfs_nn_http_url: str | None = None
     # All discovered NameNode HTTP URLs (HA clusters have ≥2). JMX is served by
     # every NN, but WebHDFS reads are served only by the ACTIVE one — the standby
     # rejects with StandbyException. The HdfsClient fails over across these
     # candidates for WebHDFS read ops. hdfs_nn_url (the first) is kept for JMX.
     hdfs_nn_candidates: list[str] = field(default_factory=list)
+    # HTTP-fallback counterparts, paired 1:1 by index with hdfs_nn_candidates
+    # (same host, HTTP port). When the HTTPS port is configured but has no live
+    # listener (OCBC clusters disable HTTPS on the web UIs), the client falls
+    # back to these. None entries mean no fallback for that candidate.
+    hdfs_nn_http_candidates: list[str] = field(default_factory=list)
     oozie_url: str | None = None
+    oozie_http_url: str | None = None
     downstream_timeout_seconds: int = 30
     disable_on_spnego: bool = True
     # When True, the downstream clients attach SPNEGO auth (from the CM
@@ -222,20 +231,23 @@ class CMPool:
                             cluster_name, client, service_name, role_name,
                             "resourcemanager_webserver_https_port",
                         )
+                        # Always compute the HTTP URL (the fallback / primary
+                        # when HTTPS isn't configured).
+                        http_port = await self._get_role_port(
+                            cluster_name, client, service_name,
+                            role_name, "yarn.resourcemanager.webapp.address",
+                            default_port=8088,
+                        )
+                        eps.yarn_rm_http_url = f"http://{hostname}:{http_port}"
                         if https_port:
                             eps.yarn_rm_url = f"https://{hostname}:{https_port}"
                         else:
-                            # Try to get the configured port; fall back to 8088
-                            port = await self._get_role_port(
-                                cluster_name, client, service_name,
-                                role_name, "yarn.resourcemanager.webapp.address",
-                                default_port=8088,
-                            )
-                            eps.yarn_rm_url = f"http://{hostname}:{port}"
+                            eps.yarn_rm_url = f"http://{hostname}:{http_port}"
                         log.debug(
                             "cm_pool.yarn_rm_discovered",
                             cluster=cluster_name,
                             url=eps.yarn_rm_url,
+                            http_url=eps.yarn_rm_http_url,
                         )
                         break
         except Exception as exc:
@@ -269,20 +281,23 @@ class CMPool:
                             cluster_name, client, service_name, role_name,
                             "ssl_server_port",
                         )
+                        # Always compute the HTTP URL (the fallback / primary
+                        # when HTTPS isn't configured).
+                        http_port = await self._get_role_port(
+                            cluster_name, client, service_name, role_name,
+                            "history.port",
+                            default_port=18088,
+                        )
+                        eps.spark_hs_http_url = f"http://{hostname}:{http_port}"
                         if https_port:
                             eps.spark_hs_url = f"https://{hostname}:{https_port}"
                         else:
-                            port = await self._get_role_port(
-                                cluster_name, client, service_name,
-                                role_name,
-                                "history.port",
-                                default_port=18088,
-                            )
-                            eps.spark_hs_url = f"http://{hostname}:{port}"
+                            eps.spark_hs_url = f"http://{hostname}:{http_port}"
                         log.debug(
                             "cm_pool.spark_hs_discovered",
                             cluster=cluster_name,
                             url=eps.spark_hs_url,
+                            http_url=eps.spark_hs_http_url,
                         )
                         break
         except Exception as exc:
@@ -323,26 +338,31 @@ class CMPool:
                     cluster_name, client, service_name, role_name,
                     "dfs_https_port",
                 )
+                # Always compute the HTTP URL (the fallback / primary when
+                # HTTPS isn't configured).
+                http_port = await self._get_role_port(
+                    cluster_name, client, service_name, role_name,
+                    "dfs.namenode.http-address",
+                    default_port=9870,
+                )
+                http_url = f"http://{hostname}:{http_port}"
+                eps.hdfs_nn_http_candidates.append(http_url)
                 if https_port:
                     nn_url = f"https://{hostname}:{https_port}"
                 else:
-                    port = await self._get_role_port(
-                        cluster_name, client, service_name,
-                        role_name,
-                        "dfs.namenode.http-address",
-                        default_port=9870,
-                    )
-                    nn_url = f"http://{hostname}:{port}"
+                    nn_url = http_url
                 eps.hdfs_nn_candidates.append(nn_url)
             # hdfs_nn_url (first candidate) is used for JMX, which every NN serves;
             # hdfs_nn_candidates (all of them) drives WebHDFS failover.
             if eps.hdfs_nn_candidates:
                 eps.hdfs_nn_url = eps.hdfs_nn_candidates[0]
+                eps.hdfs_nn_http_url = eps.hdfs_nn_http_candidates[0] if eps.hdfs_nn_http_candidates else None
                 log.debug(
                     "cm_pool.hdfs_nn_discovered",
                     cluster=cluster_name,
                     url=eps.hdfs_nn_url,
                     candidates=eps.hdfs_nn_candidates,
+                    http_url=eps.hdfs_nn_http_url,
                 )
         except Exception as exc:
             log.warning(
@@ -375,20 +395,23 @@ class CMPool:
                             cluster_name, client, service_name, role_name,
                             "oozie_https_port",
                         )
+                        # Always compute the HTTP URL (the fallback / primary
+                        # when HTTPS isn't configured).
+                        http_port = await self._get_role_port(
+                            cluster_name, client, service_name, role_name,
+                            "oozie_http_port",
+                            default_port=11000,
+                        )
+                        eps.oozie_http_url = f"http://{hostname}:{http_port}"
                         if https_port:
                             eps.oozie_url = f"https://{hostname}:{https_port}"
                         else:
-                            port = await self._get_role_port(
-                                cluster_name, client, service_name,
-                                role_name,
-                                "oozie_http_port",
-                                default_port=11000,
-                            )
-                            eps.oozie_url = f"http://{hostname}:{port}"
+                            eps.oozie_url = f"http://{hostname}:{http_port}"
                         log.debug(
                             "cm_pool.oozie_discovered",
                             cluster=cluster_name,
                             url=eps.oozie_url,
+                            http_url=eps.oozie_http_url,
                         )
                         break
         except Exception as exc:
@@ -503,6 +526,7 @@ class CMPool:
             eps.yarn_rm_url,
             timeout=eps.downstream_timeout_seconds,
             auth=self._spnego_auth(cluster_name),
+            http_url=eps.yarn_rm_http_url,
         )
 
     def get_spark_client(self, cluster_name: str):
@@ -514,6 +538,7 @@ class CMPool:
             eps.spark_hs_url,
             timeout=eps.downstream_timeout_seconds,
             auth=self._spnego_auth(cluster_name),
+            http_url=eps.spark_hs_http_url,
         )
 
     def get_hdfs_client(self, cluster_name: str):
@@ -526,6 +551,8 @@ class CMPool:
             timeout=eps.downstream_timeout_seconds,
             auth=self._spnego_auth(cluster_name),
             candidates=eps.hdfs_nn_candidates or [eps.hdfs_nn_url],
+            http_url=eps.hdfs_nn_http_url,
+            http_candidates=eps.hdfs_nn_http_candidates or None,
         )
 
     def get_oozie_client(self, cluster_name: str):
@@ -537,6 +564,7 @@ class CMPool:
             eps.oozie_url,
             timeout=eps.downstream_timeout_seconds,
             auth=self._spnego_auth(cluster_name),
+            http_url=eps.oozie_http_url,
         )
 
     def list_environments(self) -> list[str]:

@@ -17,6 +17,7 @@ from tenacity import (
 )
 
 from cdp_mcp.clients.errors import SpnegoRequiredError
+from cdp_mcp.clients.http_fallback import fetch_with_http_fallback
 
 log = structlog.get_logger(__name__)
 
@@ -40,10 +41,13 @@ class HdfsClient:
         timeout: int = 30,
         auth: Any = None,
         candidates: list[str] | None = None,
+        http_url: str | None = None,
+        http_candidates: list[str] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._auth = auth
+        self._http_url = http_url.rstrip("/") if http_url else None
         # All NameNode HTTP URLs (HA clusters have ≥2). JMX is served by every
         # NN; WebHDFS reads are served only by the active NN, so the client
         # fails over across candidates on a StandbyException. Defaults to the
@@ -51,6 +55,16 @@ class HdfsClient:
         self._candidates = [c.rstrip("/") for c in candidates] if candidates else [
             self._base_url
         ]
+        # HTTP-fallback counterparts, paired 1:1 by index with _candidates
+        # (same host, HTTP port). When the HTTPS port is configured but has no
+        # listener, the fetch helper falls back to these. None disables the
+        # fallback for a single-scheme client (preserves prior behaviour).
+        if http_candidates is not None:
+            self._http_candidates = [c.rstrip("/") if c else None for c in http_candidates]
+        elif http_url is not None:
+            self._http_candidates = [self._http_url]
+        else:
+            self._http_candidates = [None]
 
     def _retry_dec(self):
         return retry(
@@ -62,53 +76,61 @@ class HdfsClient:
             reraise=True,
         )
 
+    def _map_response(self, resp: httpx.Response, url_path: str, base_url: str) -> dict:
+        if resp.status_code == 401:
+            if "negotiate" in resp.headers.get("www-authenticate", "").lower():
+                raise SpnegoRequiredError(f"SPNEGO required for {base_url}")
+        if resp.status_code in (503, 504):
+            raise HdfsServiceUnavailable(f"HDFS NN unavailable: {resp.status_code}")
+        if resp.status_code >= 400:
+            raise HdfsClientError(f"HDFS HTTP {resp.status_code}: {resp.text[:300]}")
+        try:
+            return resp.json()
+        except ValueError as exc:
+            log.warning(
+                "hdfs_client.non_json_response",
+                status=resp.status_code,
+                content_type=resp.headers.get("content-type"),
+                body=resp.text[:300],
+            )
+            raise HdfsClientError(
+                f"HDFS NN returned non-JSON response (HTTP {resp.status_code}, "
+                f"content-type={resp.headers.get('content-type')!r}): "
+                f"{resp.text[:300]!r}"
+            ) from exc
+
     async def _get_json(self, url_path: str, params: dict, base_url: str | None = None) -> dict:
         """GET a JSON endpoint on the NameNode HTTP server (JMX or WebHDFS)
-        with retry, SPNEGO, and the shared error mapping. Returns parsed JSON.
-        ``base_url`` overrides the configured NN (used to try each HA candidate).
+        with retry, SPNEGO, the shared error mapping, and HTTPS→HTTP port
+        fallback. Returns parsed JSON. ``base_url`` overrides the configured
+        NN (used to try each HA candidate) — when given, the matching
+        ``http_base_url`` (same index in _http_candidates) is the fallback.
         """
         base = (base_url or self._base_url).rstrip("/")
+        # Resolve the HTTP-fallback counterpart for this base_url. If a
+        # specific base_url was passed (HA candidate), pair it by index;
+        # otherwise use the primary http_url.
+        if base_url is not None:
+            try:
+                idx = self._candidates.index(base)
+            except ValueError:
+                idx = 0
+            http_base = self._http_candidates[idx] if idx < len(self._http_candidates) else None
+        else:
+            http_base = self._http_url
 
-        @self._retry_dec()
-        async def _execute() -> dict:
-            async with httpx.AsyncClient(
-                base_url=base,
-                auth=self._auth,
-                timeout=self._timeout,
-                verify=False,
-                follow_redirects=True,
-            ) as client:
-                try:
-                    resp = await client.get(url_path, params=params)
-                except httpx.TransportError:
-                    raise
-                if resp.status_code == 401:
-                    if "negotiate" in resp.headers.get("www-authenticate", "").lower():
-                        raise SpnegoRequiredError(f"SPNEGO required for {self._base_url}")
-                if resp.status_code in (503, 504):
-                    raise HdfsServiceUnavailable(
-                        f"HDFS NN unavailable: {resp.status_code}"
-                    )
-                if resp.status_code >= 400:
-                    raise HdfsClientError(
-                        f"HDFS HTTP {resp.status_code}: {resp.text[:300]}"
-                    )
-                try:
-                    return resp.json()
-                except ValueError as exc:
-                    log.warning(
-                        "hdfs_client.non_json_response",
-                        status=resp.status_code,
-                        content_type=resp.headers.get("content-type"),
-                        body=resp.text[:300],
-                    )
-                    raise HdfsClientError(
-                        f"HDFS NN returned non-JSON response (HTTP {resp.status_code}, "
-                        f"content-type={resp.headers.get('content-type')!r}): "
-                        f"{resp.text[:300]!r}"
-                    ) from exc
-
-        return await _execute()
+        return await fetch_with_http_fallback(
+            primary_url=base,
+            fallback_url=http_base,
+            path=url_path,
+            params=params,
+            auth=self._auth,
+            timeout=self._timeout,
+            retry_dec=self._retry_dec,
+            map_response=self._map_response,
+            service_unavailable=HdfsServiceUnavailable,
+            service_label="NameNode JMX",
+        )
 
     async def _jmx(self, qry: str) -> dict:
         return await self._get_json("/jmx", {"qry": qry})

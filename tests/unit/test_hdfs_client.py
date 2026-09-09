@@ -6,7 +6,7 @@ import pytest
 import respx
 
 from cdp_mcp.clients.errors import SpnegoRequiredError
-from cdp_mcp.clients.hdfs_client import HdfsClient, HdfsClientError
+from cdp_mcp.clients.hdfs_client import HdfsClient, HdfsClientError, HdfsServiceUnavailable
 
 BASE = "http://nn.example.com:9870"
 
@@ -258,6 +258,64 @@ async def test_get_directory_snapshots_spnego_challenge_raises(client):
     ).mock(return_value=httpx.Response(401, headers={"WWW-Authenticate": "Negotiate"}))
     with pytest.raises(SpnegoRequiredError):
         await client.get_directory_snapshots("/data/sec")
+
+
+# ── HTTPS→HTTP port fallback ──────────────────────────────────────────────────
+
+HTTPS_BASE = "https://nn.example.com:9871"
+HTTP_FALLBACK = "http://nn.example.com:9870"
+
+
+@pytest.fixture
+def fallback_client():
+    """Client whose primary (discovered) URL is HTTPS but the HTTPS port has no
+    listener — must fall back to the HTTP port (the OCBC AA/OS/Ultron case)."""
+    return HdfsClient(HTTPS_BASE, timeout=5, http_url=HTTP_FALLBACK)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_namenode_status_https_connect_error_falls_back_to_http(fallback_client):
+    """HTTPS JMX port refused → fall back to HTTP port, return real JMX data."""
+    respx.get(f"{HTTPS_BASE}/jmx").mock(side_effect=httpx.ConnectError("connection refused"))
+    respx.get(f"{HTTP_FALLBACK}/jmx", params={"qry": "Hadoop:service=NameNode,name=FSNamesystemState"}).mock(
+        return_value=httpx.Response(200, json={"beans": [FS_HEALTHY]})
+    )
+    respx.get(f"{HTTP_FALLBACK}/jmx", params={"qry": "Hadoop:service=NameNode,name=NameNodeStatus"}).mock(
+        return_value=httpx.Response(200, json={"beans": [NN_STATUS]})
+    )
+    result = await fallback_client.get_namenode_status()
+    assert result["health_summary"] == "HEALTHY"
+    assert result["capacity_total_gb"] == 10.0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_namenode_status_both_ports_unavailable_names_both(fallback_client):
+    """HTTPS and HTTP both unreachable → HdfsServiceUnavailable naming both URLs."""
+    respx.get(f"{HTTPS_BASE}/jmx").mock(side_effect=httpx.ConnectError("no route"))
+    respx.get(f"{HTTP_FALLBACK}/jmx").mock(side_effect=httpx.ConnectError("no route"))
+    with pytest.raises(HdfsServiceUnavailable) as exc_info:
+        await fallback_client.get_namenode_status()
+    msg = str(exc_info.value)
+    assert HTTPS_BASE in msg and HTTP_FALLBACK in msg
+    assert "NameNode JMX unreachable" in msg
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_namenode_status_spnego_on_https_no_http_fallback(fallback_client):
+    """401 on the HTTPS port means it answered (auth issue) — do NOT fall back
+    to HTTP; raise SpnegoRequiredError immediately."""
+    http_route = respx.get(f"{HTTP_FALLBACK}/jmx").mock(
+        return_value=httpx.Response(200, json={"beans": [FS_HEALTHY]})
+    )
+    respx.get(f"{HTTPS_BASE}/jmx").mock(
+        return_value=httpx.Response(401, headers={"WWW-Authenticate": "Negotiate"})
+    )
+    with pytest.raises(SpnegoRequiredError):
+        await fallback_client.get_namenode_status()
+    assert http_route.calls.call_count == 0
 
 
 # ── HA failover: standby NameNode → active NameNode ─────────────────────────
