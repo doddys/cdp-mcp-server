@@ -84,6 +84,13 @@ async def fetch_with_http_fallback(
     retry_decorator = retry_dec()
 
     async def _attempt(base_url: str) -> dict:
+        log.debug(
+            "downstream.fetch_attempt",
+            service=service_label,
+            url=base_url,
+            path=path,
+            fallback_available=fallback_url is not None and fallback_url != base_url,
+        )
         @retry_decorator  # type: ignore[misc]
         async def _execute() -> dict:
             async with httpx.AsyncClient(
@@ -102,7 +109,14 @@ async def fetch_with_http_fallback(
         return await _execute()
 
     try:
-        return await _attempt(primary_url)
+        result = await _attempt(primary_url)
+        log.debug(
+            "downstream.fetch_ok",
+            service=service_label,
+            url=primary_url,
+            path=path,
+        )
+        return result
     except _CONNECTION_ERRORS as primary_exc:
         # No fallback if there's no distinct HTTP URL. Two cases land here,
         # both intentional:
@@ -117,6 +131,17 @@ async def fetch_with_http_fallback(
         #      HTTP URL). Retrying the same URL would just produce a
         #      confusing "tried X twice" message, so re-raise the original.
         if fallback_url is None or fallback_url == primary_url:
+            log.warning(
+                "downstream.fetch_failed_no_fallback",
+                service=service_label,
+                url=primary_url,
+                path=path,
+                error=f"{type(primary_exc).__name__}: {primary_exc}",
+                fallback_url=fallback_url,
+                reason="no_fallback_configured"
+                if fallback_url is None
+                else "primary_is_http",
+            )
             raise
         log.info(
             "downstream.https_failed_falling_back",
@@ -126,8 +151,24 @@ async def fetch_with_http_fallback(
             fallback=fallback_url,
         )
         try:
-            return await _attempt(fallback_url)
+            result = await _attempt(fallback_url)
+            log.debug(
+                "downstream.fetch_ok_after_fallback",
+                service=service_label,
+                url=fallback_url,
+                path=path,
+                primary=primary_url,
+            )
+            return result
         except _CONNECTION_ERRORS as fallback_exc:
+            log.warning(
+                "downstream.fetch_failed_both_urls",
+                service=service_label,
+                primary=primary_url,
+                primary_error=f"{type(primary_exc).__name__}: {primary_exc}",
+                fallback=fallback_url,
+                fallback_error=f"{type(fallback_exc).__name__}: {fallback_exc}",
+            )
             raise service_unavailable(
                 f"{service_label} unreachable: tried {primary_url} "
                 f"({type(primary_exc).__name__}: {primary_exc}) and "

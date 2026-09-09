@@ -5,14 +5,31 @@ both fail → enriched ServiceUnavailable, 401/404 on HTTPS → no fallback."""
 
 from __future__ import annotations
 
+import sys
+
 import httpx
 import pytest
 import respx
+import structlog
 
 from cdp_mcp.clients.http_fallback import fetch_with_http_fallback
 
 HTTPS = "https://nn.example.com:9871"
 HTTP = "http://nn.example.com:9870"
+
+
+@pytest.fixture(autouse=True)
+def _restore_structlog():
+    """The log-assertion tests below call ``structlog.configure`` to route
+    output to capsys's stderr. That mutates global state and leaks into
+    later tests (the cm_pool tests' YarnClient retries hang/break under a
+    reconfigured filter). Snapshot and restore structlog's config around
+    every test in this module."""
+    import copy
+
+    snapshot = copy.deepcopy(structlog.get_config())
+    yield
+    structlog.configure(**snapshot)
 
 
 class _SvcUnavailable(Exception):
@@ -161,3 +178,88 @@ async def test_read_timeout_triggers_fallback():
         service_label="NameNode JMX",
     )
     assert result == {"ok": True}
+
+
+# ── debug logging: the "identify the cause on the next run" surface ────────────
+# structlog's PrintLoggerFactory writes to stderr directly (bypassing stdlib
+# logging), so pytest's `caplog` doesn't capture it — we assert on stderr via
+# capsys instead.
+
+
+@respx.mock
+async def test_no_fallback_failure_emits_warning_log(capsys):
+    """A primary failure with no fallback (override / single-scheme) emits a
+    WARNING naming the URL + error + reason — visible at default log level so
+    the operator can see why the ConnectError surfaced without DEBUG."""
+    import logging
+
+    import structlog
+
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
+    respx.get(f"{HTTPS}/jmx").mock(side_effect=httpx.ConnectError("connection refused"))
+    with pytest.raises(httpx.ConnectError):
+        await fetch_with_http_fallback(
+            primary_url=HTTPS, fallback_url=None, path="/jmx", params=None,
+            auth=None, timeout=5, retry_dec=_retry_dec,
+            map_response=_map_ok, service_unavailable=_SvcUnavailable,
+            service_label="NameNode JMX",
+        )
+    err = capsys.readouterr().err
+    assert "downstream.fetch_failed_no_fallback" in err
+    assert HTTPS in err
+    assert "no_fallback_configured" in err
+
+
+@respx.mock
+async def test_both_fail_emits_warning_log(capsys):
+    """Both URLs failing emits a WARNING naming both URLs + errors (in addition
+    to the enriched ServiceUnavailable message)."""
+    import logging
+
+    import structlog
+
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
+    respx.get(f"{HTTPS}/jmx").mock(side_effect=httpx.ConnectError("no route"))
+    respx.get(f"{HTTP}/jmx").mock(side_effect=httpx.ConnectError("no route"))
+    with pytest.raises(_SvcUnavailable):
+        await fetch_with_http_fallback(
+            primary_url=HTTPS, fallback_url=HTTP, path="/jmx", params=None,
+            auth=None, timeout=5, retry_dec=_retry_dec,
+            map_response=_map_ok, service_unavailable=_SvcUnavailable,
+            service_label="NameNode JMX",
+        )
+    err = capsys.readouterr().err
+    assert "downstream.fetch_failed_both_urls" in err
+    assert HTTPS in err and HTTP in err
+
+
+@respx.mock
+async def test_attempt_emits_debug_log(capsys):
+    """Each attempt emits a DEBUG log naming the URL + path + whether a
+    fallback is available — surfaces with LOG_LEVEL=DEBUG."""
+    import logging
+
+    import structlog
+
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
+    respx.get(f"{HTTPS}/jmx").mock(return_value=httpx.Response(200, json={"ok": True}))
+    await fetch_with_http_fallback(
+        primary_url=HTTPS, fallback_url=HTTP, path="/jmx", params=None,
+        auth=None, timeout=5, retry_dec=_retry_dec,
+        map_response=_map_ok, service_unavailable=_SvcUnavailable,
+        service_label="NameNode JMX",
+    )
+    err = capsys.readouterr().err
+    assert "downstream.fetch_attempt" in err
+    assert HTTPS in err
+    assert "fallback_available=True" in err
+    assert "downstream.fetch_ok" in err

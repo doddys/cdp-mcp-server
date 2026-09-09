@@ -60,6 +60,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 from collections.abc import Awaitable, Callable
@@ -1069,11 +1070,33 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Print cluster names known to the registry and exit",
     )
+    p.add_argument(
+        "--log-level",
+        default=os.environ.get("LOG_LEVEL", "INFO"),
+        help="structlog level (DEBUG/INFO/WARNING). Default: INFO or $LOG_LEVEL. "
+        "Use DEBUG to see which downstream URL each fetch attempts and why it failed.",
+    )
     return p.parse_args(argv)
+
+
+def _configure_logging(level: str) -> None:
+    """Configure structlog for the collector CLI. The server process configures
+    its own; the CLI path (cdp-collect) must configure this so DEBUG logs from
+    the downstream fetch helper (which URL was tried, why it failed) surface."""
+    import logging
+
+    import structlog
+
+    numeric = getattr(logging, level.upper(), logging.INFO)
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(numeric),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
 
 
 async def _async_main(argv: list[str]) -> int:
     args = _parse_args(argv)
+    _configure_logging(args.log_level)
     pool = await build_pool()
     try:
         if args.list_clusters:
