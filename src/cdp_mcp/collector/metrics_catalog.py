@@ -142,7 +142,13 @@ CURATED_SERVICE_METRICS: dict[str, list[str]] = {
         "kafka_unclean_leader_elections_rate_across_kafka_brokers",
         "kafka_groups_preparing_rebalance_across_kafka_brokers",
         "kafka_groups_completing_rebalance_across_kafka_brokers",
-        # Throughput.
+        # Throughput. total_kafka_messages_received_rate_across_kafka_brokers
+        # is visible in a live CM dashboard chart ("Kafka message
+        # throughput") and confirmed present in the live schema (KAFKA/
+        # CLUSTER/RACK sources, CDH 7.1.9) but not live-data-verified -- no
+        # Kafka service was running on either cluster reachable from this
+        # MCP instance, same caveat as the rest of this Kafka block.
+        "total_kafka_messages_received_rate_across_kafka_brokers",
         "kafka_produce_requests_rate_across_kafka_brokers",
         "kafka_fetch_consumer_requests_rate_across_kafka_brokers",
         # Saturation -- request-handler and network-processor thread pools
