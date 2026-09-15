@@ -59,6 +59,34 @@ CURATED_SERVICE_METRICS: dict[str, list[str]] = {
         "total_capacity_remaining_across_namenodes",
         "total_bytes_read_rate_across_datanodes",
         "total_bytes_written_rate_across_datanodes",
+        # HDFS capacity -- exactly what CM's own "HDFS Capacity" dashboard
+        # chart uses, as an alternative to total_dfs_capacity_used_across_
+        # datanodes, which sums each DataNode's own "used" value at each
+        # sample point; DataNodes report at slightly different instants
+        # within a poll window, so that sum can be noisy on clusters with
+        # many DataNodes (reported live on one such cluster: a single
+        # rollup bucket's min/max swung 19 TB, 7 minutes apart).
+        # IMPORTANT -- verified live (2026-09, two CDH 7.1.9 clusters via
+        # get_service_metrics_raw's exact WHERE serviceName='hdfs' query
+        # shape): these three metric names do NOT return a series at
+        # "HDFS"-category granularity -- that series comes back with zero
+        # points. Data only appears at NAMENODE and DATANODE entity
+        # granularity, same fan-out gotcha as cpu_user_rate/cpu_system_rate
+        # on host metrics. In an HA pair, active and standby NameNode both
+        # report the same whole-filesystem value -- a consumer must pick
+        # ONE NAMENODE-category series (filter on metadata.category ==
+        # "NAMENODE" or entityName, not "HDFS"), never sum across the two,
+        # or the value doubles. On the two clusters checked, this NameNode
+        # value tracked almost identically to total_dfs_capacity_used_
+        # across_datanodes in the windows sampled -- the cross-DataNode
+        # summing noise this is meant to fix is real but its magnitude is
+        # cluster-dependent; re-confirm against a cluster that reproduces
+        # the swing before treating this as strictly more accurate there.
+        # Kept alongside the old metric rather than replacing it so
+        # downstream consumers can migrate.
+        "dfs_capacity",
+        "dfs_capacity_used",
+        "dfs_capacity_used_non_hdfs",
     ],
     "YARN": [
         "total_max_capacity_vcores_across_yarn_pools",
@@ -130,7 +158,14 @@ CURATED_SERVICE_METRICS: dict[str, list[str]] = {
         "kafka_log_directory_disk_free_space_across_kafka_broker_log_directories",
     ],
     "HBASE": [
-        # Throughput.
+        # Throughput. total_requests_rate_across_regionservers is the metric
+        # CM's own "Total Requests Across RegionServers" dashboard chart
+        # queries; requests_rate_across_regionservers is a distinct metric
+        # kept alongside it. Confirmed present in the live schema (HBASE
+        # source, CDH 7.1.9) but not live-data-verified -- no HBase service
+        # was running on either cluster reachable from this MCP instance,
+        # same caveat as the rest of this HBase block.
+        "total_requests_rate_across_regionservers",
         "requests_rate_across_regionservers",
         "read_requests_rate_across_regionservers",
         "write_requests_rate_across_regionservers",
