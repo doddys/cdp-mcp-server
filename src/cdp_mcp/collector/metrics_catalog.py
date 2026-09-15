@@ -149,6 +149,9 @@ CURATED_SERVICE_METRICS: dict[str, list[str]] = {
         # Kafka service was running on either cluster reachable from this
         # MCP instance, same caveat as the rest of this Kafka block.
         "total_kafka_messages_received_rate_across_kafka_brokers",
+        # total_kafka_bytes_received_rate_across_kafka_brokers -- same
+        # confirmation/caveat as the message-count metric above.
+        "total_kafka_bytes_received_rate_across_kafka_brokers",
         "kafka_produce_requests_rate_across_kafka_brokers",
         "kafka_fetch_consumer_requests_rate_across_kafka_brokers",
         # Saturation -- request-handler and network-processor thread pools
@@ -186,6 +189,10 @@ CURATED_SERVICE_METRICS: dict[str, list[str]] = {
         # Region-level health.
         "regions_with_errors_across_htables",
         "regions_healthy_across_htables",
+        # Capacity/inventory -- total region count across RegionServers, for
+        # region-count growth trends and rebalancing/hotspotting context.
+        # Same confirmation/caveat as the rest of this HBase block.
+        "total_regions_across_regionservers",
     ],
     "PHOENIX": [
         # Phoenix Query Server exposes only generic process/health metrics
