@@ -175,6 +175,19 @@ If an endpoint is not discovered → return a structured JSON message, never a t
 
 Default: `iceberg` (dvergari backward compatibility). For development use `file` or `env`.
 
+**Every active instance needs a unique `environment_name`.** It's the key
+`CMPool._clients`/`_cluster_map` are built on (`cm_pool.py`), so two active
+`cm_instances.yaml` entries sharing one — including both omitting it, since
+it defaults to `"default"` — used to silently connect both and then let the
+second `connect()` overwrite the first in `_clients`, orphaning its httpx
+client and dropping every cluster it manages with no error at all. This
+affected both the MCP server and the collector (`cdp-collect`), since both
+share `CMPool`. `CMPool.start()` now checks for duplicates across all active
+instances *before* connecting any of them and raises a clear `ValueError`
+naming both colliding hosts — a config bug now fails loudly at startup
+instead of silently returning only the last instance's clusters. See
+`tests/unit/test_cm_pool_multi_instance.py`.
+
 ### 7. Bound large tool responses
 A tool that returns an unbounded CM payload can exceed the MCP ~1 MB
 tool-result cap and return nothing usable (confirmed live: HDFS/Hive

@@ -79,6 +79,7 @@ class CMPool:
 
     async def start(self) -> None:
         log.info("cm_pool.start", num_instances=len(self._settings))
+        self._check_unique_environment_names()
         for cfg in self._settings:
             client = ClouderaManagerClient(cfg, self._server_cfg)
             await client.connect()
@@ -90,6 +91,33 @@ class CMPool:
             )
 
         await self._build_cluster_map()
+
+    def _check_unique_environment_names(self) -> None:
+        """environment_name is the key self._clients/_cluster_map are built
+        on (see list_environments/get_client_for_environment below, and
+        server.py's env-name iteration over every tool). Two active
+        instances sharing one -- both defaulting to "default" when omitted
+        is the common way this happens -- would otherwise both connect, then
+        the second connect() silently overwrites the first in self._clients,
+        orphaning its httpx client (never closed) and dropping every cluster
+        it manages from _cluster_map with no error at all -- this is why a
+        registry with several active CM instances can appear to only ever
+        return the last one's clusters. Checked upfront, before any
+        connect(), so a bad config fails loudly without leaving a half-
+        connected pool to clean up."""
+        seen: dict[str, str] = {}
+        for cfg in self._settings:
+            prior_host = seen.get(cfg.environment_name)
+            if prior_host is not None:
+                raise ValueError(
+                    f"Duplicate environment_name {cfg.environment_name!r} in CM "
+                    f"registry: both {prior_host!r} and {cfg.effective_host!r} use "
+                    "it. Each active instance in cm_instances.yaml must have a "
+                    "unique environment_name (it defaults to \"default\" when "
+                    "omitted) -- otherwise the later instance silently replaces "
+                    "the earlier one and its clusters are never discovered."
+                )
+            seen[cfg.environment_name] = cfg.effective_host
 
     async def stop(self) -> None:
         log.info("cm_pool.stop", num_clients=len(self._clients))
