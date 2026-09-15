@@ -87,6 +87,18 @@ CURATED_SERVICE_METRICS: dict[str, list[str]] = {
         "dfs_capacity",
         "dfs_capacity_used",
         "dfs_capacity_used_non_hdfs",
+        # Data-loss / replication-risk health -- the two metrics CM's own
+        # "HDFS Health" tile actually watches for red/yellow status,
+        # completely absent from this list before. Same NAMENODE-not-HDFS-
+        # category caveat as dfs_capacity_used above: verified live
+        # (2026-09) both return zero points at "HDFS" category and real
+        # data at NAMENODE (both active/standby report the same value --
+        # pick one, don't sum). On the two clusters checked, both were
+        # steadily 0 (healthy) -- confirmed genuine (not an empty/broken
+        # series) via blocks_total returning real non-zero counts in the
+        # same query.
+        "missing_blocks",
+        "under_replicated_blocks",
     ],
     "YARN": [
         "total_max_capacity_vcores_across_yarn_pools",
